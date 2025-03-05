@@ -1,0 +1,163 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" type="text/css" href="{% static 'admin/css/forms.css' %}">
+  <link rel="stylesheet" type="text/css" href="{% static 'admin/css/import-tools.css' %}">
+  <style>
+    /* 进度显示样式 */
+    .progress-container {
+      margin-top: 20px;
+      border: 1px solid #ddd;
+      border-radius: 5px;
+      overflow: hidden;
+    }
+    
+    .progress-bar {
+      height: 20px;
+      background: linear-gradient(90deg, #4CAF50, #8BC34A);
+      width: 0%;
+      transition: width 0.5s;
+    }
+    
+    .progress-steps {
+      margin-top: 20px;
+      text-align: left;
+    }
+    
+    .step {
+      margin-bottom: 8px;
+      color: #666;
+    }
+    
+    .step.active {
+      color: #417690;
+      font-weight: bold;
+    }
+    
+    .step.completed {
+      color: #4CAF50;
+    }
+    
+    .step-indicator {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      line-height: 20px;
+      text-align: center;
+      border-radius: 50%;
+      background: #eee;
+      margin-right: 10px;
+    }
+    
+    .step.active .step-indicator {
+      background: #417690;
+      color: white;
+    }
+    
+    .step.completed .step-indicator {
+      background: #4CAF50;
+      color: white;
+    }
+  </style>
+{% endblock %}
+
+{% block js %}
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    const progressBar = document.querySelector('.progress-bar');
+    const progressMessage = document.getElementById('progress-message');
+    const steps = document.querySelectorAll('.step');
+    
+    function updateProgress() {
+      fetch('/import-progress/')
+        .then(response => response.json())
+        .then(data => {
+          // 更新进度条
+          progressBar.style.width = data.progress + '%';
+          progressMessage.textContent = data.message;
+          
+          // 更新步骤
+          steps.forEach((step, index) => {
+            if (index < data.current_step) {
+              step.classList.remove('active');
+              step.classList.add('completed');
+            } else if (index === data.current_step) {
+              step.classList.add('active');
+              step.classList.remove('completed');
+            } else {
+              step.classList.remove('active');
+              step.classList.remove('completed');
+            }
+          });
+          
+          // 检查是否完成
+          if (data.is_complete) {
+            clearInterval(progressInterval);
+            
+            if (data.error) {
+              // 显示错误
+              document.getElementById('error-container').textContent = data.error;
+              document.getElementById('error-container').style.display = 'block';
+            } else {
+              // 显示完成信息并跳转
+              setTimeout(function() {
+                window.location.href = '/admin/import-success/';
+              }, 1000);
+            }
+          }
+        });
+    }
+    
+    // 每秒更新一次进度
+    const progressInterval = setInterval(updateProgress, 1000);
+    
+    // 立即更新一次
+    updateProgress();
+  });
+</script>
+{% endblock %}
+
+{% block content %}
+<div class="content-wrapper">
+  <div class="form-container">
+    <div class="form-header">
+      <h2>导入进行中</h2>
+    </div>
+    <div style="padding: 20px;">
+      <p id="progress-message">准备开始导入...</p>
+      
+      <div class="progress-container">
+        <div class="progress-bar" style="width: 0%"></div>
+      </div>
+      
+      <div class="progress-steps">
+        <div class="step">
+          <span class="step-indicator">1</span> 验证并处理Excel文件
+        </div>
+        <div class="step">
+          <span class="step-indicator">2</span> 导入学校数据
+        </div>
+        <div class="step">
+          <span class="step-indicator">3</span> 导入年级数据
+        </div>
+        <div class="step">
+          <span class="step-indicator">4</span> 导入班级数据
+        </div>
+        <div class="step">
+          <span class="step-indicator">5</span> 导入学生数据
+        </div>
+        <div class="step">
+          <span class="step-indicator">6</span> 创建考试记录
+        </div>
+        <div class="step">
+          <span class="step-indicator">7</span> 导入成绩数据
+        </div>
+      </div>
+      
+      <div id="error-container" style="display: none; color: red; margin-top: 20px; padding: 10px; border: 1px solid red; background-color: #fff9f9;"></div>
+    </div>
+  </div>
+</div>
+{% endblock %} 

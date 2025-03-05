@@ -1,0 +1,28 @@
+{% extends "admin/change_list.html" %}
+{% load i18n admin_urls static admin_list %}
+
+{% block object-tools-items %}
+  <li>
+    <a href="{% url 'admin:import-data' %}" class="addlink">
+      {% blocktrans %}导入数据{% endblocktrans %}
+    </a>
+  </li>
+  {{ block.super }}
+{% endblock %}
+
+<div class="card mb-3">
+    <div class="card-header bg-primary text-white">
+        <h5 class="mb-0">教师历史记录管理</h5>
+    </div>
+    <div class="card-body">
+        <p>管理教师历史任教记录，查看教师在不同学期的任教情况。</p>
+        <div class="btn-group">
+            <a href="{% url 'teacher_history' %}" class="btn btn-outline-primary">
+                <i class="fas fa-history"></i> 教师历史记录管理
+            </a>
+            <a href="{% url 'teacher_history_summary' %}" class="btn btn-outline-info">
+                <i class="fas fa-chart-bar"></i> 历史记录统计
+            </a>
+        </div>
+    </div>
+</div> 

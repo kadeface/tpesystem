@@ -1,0 +1,368 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" type="text/css" href="{% static 'admin/css/forms.css' %}">
+  <link rel="stylesheet" type="text/css" href="{% static 'admin/css/import-tools.css' %}">
+  <style type="text/css">
+    /* 优化表单样式 */
+    .content-wrapper {
+      width: 100%;
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    
+    .form-container {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+      padding: 0;
+      width: 100%;
+    }
+    
+    .form-row {
+      margin-bottom: 20px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid #f0f0f0;
+    }
+    
+    .form-row label {
+      display: block;
+      font-weight: bold;
+      margin-bottom: 10px;
+      font-size: 14px;
+      color: #333;
+    }
+    
+    /* 扩大输入框宽度 */
+    .form-row input[type="text"],
+    .form-row input[type="file"],
+    .form-row select {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background: #f9f9f9;
+      font-size: 14px;
+      box-sizing: border-box;
+    }
+    
+    /* 确保下拉菜单显示完整 */
+    .form-row select {
+      height: auto;
+      min-height: 40px;
+    }
+    
+    /* 帮助文本更清晰 */
+    .form-help {
+      color: #666;
+      font-size: 13px;
+      margin-top: 8px;
+      line-height: 1.4;
+    }
+    
+    /* 复选框样式优化 */
+    .form-row input[type="checkbox"] {
+      margin-right: 8px;
+      transform: scale(1.2);
+    }
+    
+    /* 确保按钮样式合适 */
+    .btn-primary {
+      display: inline-block;
+      background: #79aec8;
+      padding: 12px 20px;
+      border: none;
+      border-radius: 4px;
+      color: #fff;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: bold;
+    }
+    
+    /* 添加进度显示样式 */
+    .loading-overlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 9999;
+      justify-content: center;
+      align-items: center;
+    }
+    
+    .loading-content {
+      background: white;
+      padding: 30px;
+      border-radius: 10px;
+      box-shadow: 0 0 20px rgba(0, 0, 0, 0.3);
+      text-align: center;
+      max-width: 500px;
+      width: 80%;
+    }
+    
+    .loading-spinner {
+      border: 5px solid #f3f3f3;
+      border-top: 5px solid #417690;
+      border-radius: 50%;
+      width: 50px;
+      height: 50px;
+      margin: 0 auto 20px;
+      animation: spin 2s linear infinite;
+    }
+    
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    
+    .progress-container {
+      margin-top: 20px;
+      border: 1px solid #ddd;
+      border-radius: 5px;
+      overflow: hidden;
+    }
+    
+    .progress-bar {
+      height: 20px;
+      background: linear-gradient(90deg, #4CAF50, #8BC34A);
+      width: 0%;
+      transition: width 0.5s;
+    }
+    
+    .progress-steps {
+      margin-top: 20px;
+      text-align: left;
+    }
+    
+    .step {
+      margin-bottom: 8px;
+      color: #666;
+    }
+    
+    .step.active {
+      color: #417690;
+      font-weight: bold;
+    }
+    
+    .step.completed {
+      color: #4CAF50;
+    }
+    
+    .step-indicator {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      line-height: 20px;
+      text-align: center;
+      border-radius: 50%;
+      background: #eee;
+      margin-right: 10px;
+    }
+    
+    .step.active .step-indicator {
+      background: #417690;
+      color: white;
+    }
+    
+    .step.completed .step-indicator {
+      background: #4CAF50;
+      color: white;
+    }
+  </style>
+{% endblock %}
+
+{% block js %}
+  {{ block.super }}
+  <script type="text/javascript">
+    document.addEventListener('DOMContentLoaded', function() {
+      // 获取表单和加载遮罩元素
+      const importForm = document.getElementById('import-form');
+      const loadingOverlay = document.getElementById('loading-overlay');
+      const progressSteps = document.querySelectorAll('.step');
+      const progressBar = document.querySelector('.progress-bar');
+      
+      // 当表单提交时显示加载动画
+      if (importForm) {
+        importForm.addEventListener('submit', function(e) {
+          // 检查表单有效性
+          if (this.checkValidity()) {
+            // 表单有效，显示加载动画
+            loadingOverlay.style.display = 'flex';
+            
+            // 模拟进度步骤更新
+            simulateProgress();
+          }
+        });
+      }
+      
+      // 模拟进度更新函数
+      function simulateProgress() {
+        const steps = Array.from(progressSteps);
+        let currentStep = 0;
+        let progress = 0;
+        
+        // 激活第一个步骤
+        if (steps.length > 0) {
+          steps[0].classList.add('active');
+        }
+        
+        const interval = setInterval(function() {
+          // 增加进度条
+          progress += 5;
+          if (progress > 100) progress = 100;
+          progressBar.style.width = progress + '%';
+          
+          // 更新步骤状态
+          if (progress > (currentStep + 1) * (100 / steps.length) && currentStep < steps.length - 1) {
+            // 完成当前步骤
+            steps[currentStep].classList.remove('active');
+            steps[currentStep].classList.add('completed');
+            
+            // 激活下一个步骤
+            currentStep++;
+            steps[currentStep].classList.add('active');
+          }
+          
+          // 所有步骤完成
+          if (progress >= 100) {
+            clearInterval(interval);
+            steps[currentStep].classList.remove('active');
+            steps[currentStep].classList.add('completed');
+          }
+        }, 1000);
+      }
+    });
+  </script>
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="javascript:history.back();">返回</a>
+  &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div style="max-width: 1000px; margin: 0 auto;">
+  <div style="background: #fff; border: 1px solid #ddd; border-radius: 6px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); margin-bottom: 20px; padding: 15px;">
+    <h2 style="margin-top: 0; color: #417690; border-bottom: 1px solid #eee; padding-bottom: 10px;">{{ title }}</h2>
+    
+    {% if title == "导入学生成绩数据" %}
+    <!-- 学期导入说明（仅在成绩导入页面显示） -->
+    <div style="background: #fff8e1; border-left: 4px solid #ffb300; padding: 15px; margin-bottom: 20px;">
+      <h3 style="margin-top: 0; color: #bf8c00; font-size: 16px;">⚠️ 学期导入说明</h3>
+      <p style="margin-bottom: 10px; line-height: 1.5;">请注意选择正确的导入学期：</p>
+      <ul style="margin-bottom: 10px;">
+        <li><strong>活跃学期</strong>：数据将导入到当前正常数据表中</li>
+        <li><strong>非活跃学期</strong>：数据将自动导入到历史记录中，不影响当前数据</li>
+      </ul>
+      <p>这种设计允许您随时导入历史学期的数据，而无需担心数据混乱。</p>
+      <p style="margin-top: 10px;"><strong>重要提示：</strong> 如果您要重新导入已存在的考试数据，请勾选"强制导入"选项，否则系统将自动取消导入以保护现有数据。</p>
+    </div>
+    {% endif %}
+    
+    <!-- 导入表单 -->
+    <form method="post" enctype="multipart/form-data" action="{{ request.path }}" id="import-form">
+      {% csrf_token %}
+      
+      <div style="margin-bottom: 30px;">
+        {% for field in form %}
+          <div style="margin-bottom: 15px;">
+            <label for="{{ field.id_for_label }}" style="display: block; font-weight: bold; margin-bottom: 5px;">
+              {{ field.label }}
+              {% if field.field.required %}<span style="color: #f44336;">*</span>{% endif %}
+            </label>
+            {{ field }}
+            {% if field.help_text %}
+              <p style="color: #666; font-size: 12px; margin-top: 5px;">{{ field.help_text }}</p>
+            {% endif %}
+            {% if field.errors %}
+              <div style="color: #f44336; font-size: 13px; margin-top: 5px;">
+                {% for error in field.errors %}
+                  {{ error }}
+                {% endfor %}
+              </div>
+            {% endif %}
+          </div>
+        {% endfor %}
+      </div>
+      
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 30px;">
+        <a href="{{ admin_index_url }}" style="color: #417690; text-decoration: none;">« 返回</a>
+        <button type="submit" name="submit" style="background: #417690; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer;">开始导入</button>
+      </div>
+    </form>
+  </div>
+  
+  {% if title == "导入学生成绩数据" %}
+  <!-- 数据格式说明（仅在成绩导入页面显示） -->
+  <div style="background: #fff; border: 1px solid #ddd; border-radius: 6px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); padding: 15px;">
+    <h3 style="margin-top: 0; color: #417690; border-bottom: 1px solid #eee; padding-bottom: 10px;">数据格式说明</h3>
+    <p>Excel文件必须包含以下列：</p>
+    <ul>
+      <li>考生号、姓名、身份证号、学籍号</li>
+      <li>学校代码、学校名称、年级、班别</li>
+      <li>各学科成绩列（如语文、数学、英语等）</li>
+    </ul>
+    <p>学科列名必须与系统预定义的学科名称匹配，支持的学科包括：</p>
+    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px;">
+      <div>语文</div>
+      <div>数学</div>
+      <div>英语</div>
+      <div>物理</div>
+      <div>化学</div>
+      <div>生物</div>
+      <div>历史</div>
+      <div>地理</div>
+      <div>道德与法治</div>
+      <div>科学</div>
+      <div>总分</div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+<!-- 导入进度遮罩层 -->
+<div id="loading-overlay" class="loading-overlay">
+  <div class="loading-content">
+    <div class="loading-spinner"></div>
+    <h3>正在导入数据，请耐心等待...</h3>
+    <p>大型数据集可能需要几分钟时间，请不要关闭或刷新页面</p>
+    
+    <div class="progress-container">
+      <div class="progress-bar"></div>
+    </div>
+    
+    <div class="progress-steps">
+      <div class="step">
+        <span class="step-indicator">1</span> 验证并处理Excel文件
+      </div>
+      <div class="step">
+        <span class="step-indicator">2</span> 导入学校数据
+      </div>
+      <div class="step">
+        <span class="step-indicator">3</span> 导入年级数据
+      </div>
+      <div class="step">
+        <span class="step-indicator">4</span> 导入班级数据
+      </div>
+      <div class="step">
+        <span class="step-indicator">5</span> 导入学生数据
+      </div>
+      <div class="step">
+        <span class="step-indicator">6</span> 创建考试记录
+      </div>
+      <div class="step">
+        <span class="step-indicator">7</span> 导入成绩数据
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %} 

@@ -1,0 +1,135 @@
+<div class="form-group">
+    <div class="card">
+        <div class="card-header">
+            <h5>教师任课历史记录</h5>
+        </div>
+        <div class="card-body">
+            <div class="mb-3">
+                <button type="button" class="btn btn-primary" id="rebuildHistory"
+                        data-teacher-id="{{ original.teacher_id }}" 
+                        data-teacher-name="{{ original.name }}">
+                    <i class="fas fa-sync-alt"></i> 重建历史记录
+                </button>
+                <a href="{% url 'teacher_history' %}?teacher={{ original.teacher_id }}" class="btn btn-info">
+                    <i class="fas fa-list"></i> 查看完整历史
+                </a>
+            </div>
+            
+            <table class="table table-striped">
+                <thead>
+                    <tr>
+                        <th>学期</th>
+                        <th>学科</th>
+                        <th>班级</th>
+                        <th>状态</th>
+                        <th>起止时间</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for record in original.history.all|dictsortreversed:"semester.start_date" %}
+                    <tr>
+                        <td>{{ record.semester.semester_name }}</td>
+                        <td>{{ record.subject.subject_name }}</td>
+                        <td>{{ record.class_field.class_name|default:"-" }}</td>
+                        <td>
+                            {% if record.status == 'ACTIVE' %}
+                            <span class="badge bg-success">在任</span>
+                            {% elif record.status == 'COMPLETED' %}
+                            <span class="badge bg-secondary">已结束</span>
+                            {% else %}
+                            <span class="badge bg-warning">{{ record.status }}</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ record.start_date|date:"Y-m-d" }} 至 
+                            {% if record.end_date %}
+                            {{ record.end_date|date:"Y-m-d" }}
+                            {% else %}
+                            至今
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="5" class="text-center">暂无历史记录</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+$(document).ready(function() {
+    $('#rebuildHistory').click(function() {
+        const teacherId = $(this).data('teacher-id');
+        const teacherName = $(this).data('teacher-name');
+        
+        Swal.fire({
+            title: '确认操作',
+            text: `确定要重建教师 ${teacherName} 的历史记录吗？`,
+            icon: 'question',
+            showCancelButton: true,
+            confirmButtonText: '确定',
+            cancelButtonText: '取消'
+        }).then((result) => {
+            if (result.isConfirmed) {
+                rebuildTeacherHistory(teacherId);
+            }
+        });
+    });
+    
+    function rebuildTeacherHistory(teacherId) {
+        const csrfToken = $('input[name="csrfmiddlewaretoken"]').val();
+        let formData = new FormData();
+        formData.append('teacher_id', teacherId);
+        
+        Swal.fire({
+            title: '正在处理',
+            text: '正在重建历史记录，请稍候...',
+            allowOutsideClick: false,
+            didOpen: () => {
+                Swal.showLoading();
+            }
+        });
+        
+        $.ajax({
+            url: '{% url "rebuild_teacher_history" %}',
+            type: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            headers: {
+                'X-CSRFToken': csrfToken
+            },
+            success: function(response) {
+                if (response.status === 'success') {
+                    Swal.fire({
+                        icon: 'success',
+                        title: '成功',
+                        text: response.message,
+                        confirmButtonText: '确定'
+                    }).then(() => {
+                        location.reload();
+                    });
+                } else {
+                    Swal.fire({
+                        icon: 'error',
+                        title: '错误',
+                        text: response.message || '操作失败',
+                        confirmButtonText: '确定'
+                    });
+                }
+            },
+            error: function(xhr) {
+                Swal.fire({
+                    icon: 'error',
+                    title: '错误',
+                    text: '请求失败，请稍后重试',
+                    confirmButtonText: '确定'
+                });
+            }
+        });
+    }
+});
+</script> 

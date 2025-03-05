@@ -1,0 +1,137 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+<div style="max-width: 1000px; margin: 0 auto;">
+  <div style="background: #fff; border: 1px solid #ddd; border-radius: 6px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); margin-bottom: 20px; padding: 15px;">
+    <h2 style="margin-top: 0; color: #417690; border-bottom: 1px solid #eee; padding-bottom: 10px;">学生成绩数据导入</h2>
+    
+    <!-- 学期升级提示 -->
+    <div style="background: #fff8e1; border-left: 4px solid #ffb300; padding: 15px; margin-bottom: 20px;">
+      <h3 style="margin-top: 0; color: #bf8c00; font-size: 16px;">⚠️ 学期升级提示</h3>
+      <p style="margin-bottom: 10px; line-height: 1.5;">导入新学期成绩数据前，请确认是否已完成上一学期的升级操作。未进行升级可能导致：</p>
+      <ul style="margin-bottom: 10px;">
+        <li>班级年级关联错误</li>
+        <li>学生历史记录缺失</li>
+        <li>教师任课关系混乱</li>
+      </ul>
+      <p><strong>建议先执行以下升级命令：</strong></p>
+      <pre style="background: #f7f7f7; padding: 10px; border-radius: 4px; overflow-x: auto;">python manage.py promote_students --from-semester=[上一学期ID] --to-semester=[当前学期ID]
+python manage.py promote_teachers --from-semester=[上一学期ID] --to-semester=[当前学期ID]</pre>
+    </div>
+    
+    <!-- 导入表单 -->
+    <form method="post" enctype="multipart/form-data">
+      {% csrf_token %}
+      
+      <div style="margin-bottom: 20px;">
+        <h3 style="margin-top: 0; font-size: 16px;">基本信息</h3>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+          <div>
+            <label style="display: block; margin-bottom: 5px;">Excel文件：</label>
+            <input type="file" name="file" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+          </div>
+          <div>
+            <label style="display: block; margin-bottom: 5px;">工作表名称：</label>
+            <input type="text" name="sheet_name" value="Sheet1" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+          </div>
+        </div>
+      </div>
+      
+      <div style="margin-bottom: 20px;">
+        <h3 style="margin-top: 0; font-size: 16px;">考试信息</h3>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+          <div>
+            <label style="display: block; margin-bottom: 5px;">考试ID：</label>
+            <input type="text" name="exam_id" required placeholder="例如：2023-DIST-FINAL" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+          </div>
+          <div>
+            <label style="display: block; margin-bottom: 5px;">考试名称：</label>
+            <input type="text" name="exam_name" required placeholder="例如：2023学年第一学期期末考试" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+          </div>
+          <div>
+            <label style="display: block; margin-bottom: 5px;">考试类型：</label>
+            <select name="exam_type" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+              <option value="MIDTERM">期中考试</option>
+              <option value="FINAL">期末考试</option>
+              <option value="ENTRANCE">入学考试</option>
+              <option value="MONTHLY">月考</option>
+              <option value="DIST-TEST">区统考</option>
+            </select>
+          </div>
+          <div>
+            <label style="display: block; margin-bottom: 5px;">学期：</label>
+            <input type="text" name="semester" required placeholder="例如：2023-2024-1" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+          </div>
+        </div>
+      </div>
+      
+      <div style="margin-bottom: 20px;">
+        <h3 style="margin-top: 0; font-size: 16px;">高级选项</h3>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+          <div>
+            <label style="display: flex; align-items: center;">
+              <input type="checkbox" name="create_students" value="1" checked>
+              <span style="margin-left: 5px;">自动创建不存在的学生</span>
+            </label>
+          </div>
+          <div>
+            <label style="display: flex; align-items: center;">
+              <input type="checkbox" name="update_students" value="1" checked>
+              <span style="margin-left: 5px;">更新现有学生信息</span>
+            </label>
+          </div>
+          <div>
+            <label style="display: flex; align-items: center;">
+              <input type="checkbox" name="skip_teacher" value="1">
+              <span style="margin-left: 5px;">不关联教师</span>
+            </label>
+          </div>
+          <div>
+            <label style="display: flex; align-items: center;">
+              <input type="checkbox" name="debug" value="1">
+              <span style="margin-left: 5px;">调试模式</span>
+            </label>
+          </div>
+          <div>
+            <label style="display: flex; align-items: center;">
+              <input type="checkbox" name="force" value="1">
+              <span style="margin-left: 5px;">强制导入</span>
+            </label>
+            <small style="color: #999; display: block; margin-top: 3px;">跳过安全检查，不推荐</small>
+          </div>
+        </div>
+      </div>
+      
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 30px;">
+        <a href="{% url 'import-data' %}" style="color: #417690; text-decoration: none;">« 返回导入工具列表</a>
+        <button type="submit" style="background: #417690; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer;">开始导入</button>
+      </div>
+    </form>
+  </div>
+  
+  <!-- 导入说明 -->
+  <div style="background: #fff; border: 1px solid #ddd; border-radius: 6px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); padding: 15px;">
+    <h3 style="margin-top: 0; color: #417690; border-bottom: 1px solid #eee; padding-bottom: 10px;">数据格式说明</h3>
+    <p>Excel文件必须包含以下列：</p>
+    <ul>
+      <li>考生号、姓名、身份证号、学籍号</li>
+      <li>学校代码、学校名称、年级、班别</li>
+      <li>各学科成绩列（如语文、数学、英语等）</li>
+    </ul>
+    <p>学科列名必须与系统预定义的学科名称匹配，支持的学科包括：</p>
+    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px;">
+      <div>语文</div>
+      <div>数学</div>
+      <div>英语</div>
+      <div>物理</div>
+      <div>化学</div>
+      <div>生物</div>
+      <div>历史</div>
+      <div>地理</div>
+      <div>道德与法治</div>
+      <div>总分</div>
+    </div>
+  </div>
+</div>
+{% endblock %} 

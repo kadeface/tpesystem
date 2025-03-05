@@ -1,0 +1,372 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block content %}
+<div class="container-fluid">
+    <h1>{{ title }}</h1>
+    
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5>教师学期升级</h5>
+        </div>
+        <div class="card-body">
+            <p class="alert alert-info">
+                <i class="fas fa-info-circle"></i> 
+                此功能将教师从上一学期的任课记录升级到新学期，自动创建历史记录并为新学期生成任课关系。
+            </p>
+            
+            <form id="promoteForm" class="row g-3">
+                {% csrf_token %}
+                
+                <div class="col-md-5">
+                    <label for="fromSemester" class="form-label">源学期 (上一学期)</label>
+                    <select id="fromSemester" name="from_semester" class="form-select" required>
+                        <option value="">-- 请选择源学期 --</option>
+                        {% for semester in from_semesters %}
+                        <option value="{{ semester.semester_id }}">{{ semester.semester_name }}</option>
+                        {% endfor %}
+                    </select>
+                    <small class="form-text text-muted">选择要从哪个学期升级教师</small>
+                </div>
+                
+                <div class="col-md-5">
+                    <label for="toSemester" class="form-label">目标学期 (新学期)</label>
+                    <select id="toSemester" name="to_semester" class="form-select" required>
+                        <option value="">-- 请选择目标学期 --</option>
+                        {% for semester in to_semesters %}
+                        <option value="{{ semester.semester_id }}">{{ semester.semester_name }}</option>
+                        {% endfor %}
+                    </select>
+                    <small class="form-text text-muted">选择要升级到哪个学期</small>
+                </div>
+                
+                <div class="col-md-2 d-flex align-items-end">
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="autoMatch" name="auto_match" checked>
+                        <label class="form-check-label" for="autoMatch">自动匹配班级</label>
+                    </div>
+                </div>
+                
+                <div class="col-12 mt-4">
+                    <button type="button" id="previewBtn" class="btn btn-secondary">
+                        <i class="fas fa-eye"></i> 预览影响
+                    </button>
+                    <button type="button" id="promoteBtn" class="btn btn-primary">
+                        <i class="fas fa-graduation-cap"></i> 执行升级
+                    </button>
+                    <a href="{% url 'import-data' %}" class="btn btn-outline-secondary">
+                        <i class="fas fa-arrow-left"></i> 返回
+                    </a>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <div id="resultCard" class="card mb-4 d-none">
+        <div class="card-header">
+            <h5>处理结果</h5>
+        </div>
+        <div class="card-body">
+            <div id="previewResults" class="d-none">
+                <h5 class="text-primary">预览模式 - 不会修改数据</h5>
+                <table class="table table-bordered">
+                    <tbody>
+                        <tr>
+                            <th width="30%">源学期</th>
+                            <td id="previewFromSemester">-</td>
+                        </tr>
+                        <tr>
+                            <th>目标学期</th>
+                            <td id="previewToSemester">-</td>
+                        </tr>
+                        <tr>
+                            <th>教师数量</th>
+                            <td id="previewTeacherCount">-</td>
+                        </tr>
+                        <tr>
+                            <th>班级数量</th>
+                            <td id="previewClassCount">-</td>
+                        </tr>
+                        <tr>
+                            <th>学科数量</th>
+                            <td id="previewSubjectCount">-</td>
+                        </tr>
+                        <tr>
+                            <th>总任课记录数</th>
+                            <td id="previewRecordCount">-</td>
+                        </tr>
+                    </tbody>
+                </table>
+                
+                <div class="alert alert-warning">
+                    <i class="fas fa-exclamation-triangle"></i> 
+                    确认以上信息无误后，请点击"执行升级"按钮进行实际操作。
+                </div>
+            </div>
+            
+            <div id="promotionResults" class="d-none">
+                <h5 class="text-success">升级完成</h5>
+                <div class="row mb-3">
+                    <div class="col-md-6">
+                        <div class="card bg-light">
+                            <div class="card-body">
+                                <h6 class="card-title">成功</h6>
+                                <h2 class="text-success" id="successCount">0</h2>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card bg-light">
+                            <div class="card-body">
+                                <h6 class="card-title">跳过</h6>
+                                <h2 class="text-warning" id="skippedCount">0</h2>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <h6>处理详情</h6>
+                <div class="table-responsive">
+                    <table class="table table-striped table-sm" id="detailsTable">
+                        <thead>
+                            <tr>
+                                <th>教师</th>
+                                <th>学科</th>
+                                <th>原班级</th>
+                                <th>新班级</th>
+                                <th>状态</th>
+                                <th>原因</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- 动态填充 -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 确认对话框 -->
+<div class="modal fade" id="confirmModal" tabindex="-1" aria-labelledby="confirmModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="confirmModalLabel">确认操作</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                确定要执行教师升级操作吗？此操作将为所有教师创建历史记录，并生成新学期的任课关系。
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="confirmPromoteBtn">确定</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+$(document).ready(function() {
+    // 预览按钮点击事件
+    $('#previewBtn').click(function() {
+        const fromSemester = $('#fromSemester').val();
+        const toSemester = $('#toSemester').val();
+        
+        if (!fromSemester || !toSemester) {
+            Swal.fire({
+                icon: 'error',
+                title: '错误',
+                text: '请选择源学期和目标学期',
+                confirmButtonText: '确定'
+            });
+            return;
+        }
+        
+        // 显示loading
+        Swal.fire({
+            title: '正在处理',
+            text: '正在预览数据，请稍候...',
+            allowOutsideClick: false,
+            didOpen: () => {
+                Swal.showLoading();
+            }
+        });
+        
+        // 准备数据
+        const formData = new FormData($('#promoteForm')[0]);
+        formData.append('dry_run', 'true');
+        
+        // 发送请求
+        $.ajax({
+            url: '{% url "perform_teacher_promotion" %}',
+            type: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            success: function(response) {
+                Swal.close();
+                
+                if (response.status === 'success') {
+                    // 显示预览结果
+                    $('#resultCard').removeClass('d-none');
+                    $('#previewResults').removeClass('d-none');
+                    $('#promotionResults').addClass('d-none');
+                    
+                    // 填充数据
+                    $('#previewFromSemester').text(response.data.from_semester);
+                    $('#previewToSemester').text(response.data.to_semester);
+                    $('#previewTeacherCount').text(response.data.teacher_count);
+                    $('#previewClassCount').text(response.data.class_count);
+                    $('#previewSubjectCount').text(response.data.subject_count);
+                    $('#previewRecordCount').text(response.data.record_count);
+                    
+                    // 滚动到结果区域
+                    $('html, body').animate({
+                        scrollTop: $('#resultCard').offset().top - 100
+                    }, 500);
+                } else {
+                    Swal.fire({
+                        icon: 'error',
+                        title: '错误',
+                        text: response.message,
+                        confirmButtonText: '确定'
+                    });
+                }
+            },
+            error: function(xhr) {
+                Swal.fire({
+                    icon: 'error',
+                    title: '错误',
+                    text: '请求失败，请稍后重试',
+                    confirmButtonText: '确定'
+                });
+            }
+        });
+    });
+    
+    // 执行升级按钮点击事件
+    $('#promoteBtn').click(function() {
+        const fromSemester = $('#fromSemester').val();
+        const toSemester = $('#toSemester').val();
+        
+        if (!fromSemester || !toSemester) {
+            Swal.fire({
+                icon: 'error',
+                title: '错误',
+                text: '请选择源学期和目标学期',
+                confirmButtonText: '确定'
+            });
+            return;
+        }
+        
+        // 显示确认对话框
+        $('#confirmModal').modal('show');
+    });
+    
+    // 确认升级按钮点击事件
+    $('#confirmPromoteBtn').click(function() {
+        $('#confirmModal').modal('hide');
+        
+        // 显示loading
+        Swal.fire({
+            title: '正在处理',
+            text: '正在执行升级，请稍候...',
+            allowOutsideClick: false,
+            didOpen: () => {
+                Swal.showLoading();
+            }
+        });
+        
+        // 准备数据
+        const formData = new FormData($('#promoteForm')[0]);
+        
+        // 发送请求
+        $.ajax({
+            url: '{% url "perform_teacher_promotion" %}',
+            type: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            success: function(response) {
+                Swal.close();
+                
+                if (response.status === 'success') {
+                    // 显示升级结果
+                    $('#resultCard').removeClass('d-none');
+                    $('#previewResults').addClass('d-none');
+                    $('#promotionResults').removeClass('d-none');
+                    
+                    // 填充数据
+                    $('#successCount').text(response.data.success);
+                    $('#skippedCount').text(response.data.skipped);
+                    
+                    // 清空详情表格
+                    $('#detailsTable tbody').empty();
+                    
+                    // 填充详情表格
+                    if (response.data.details && response.data.details.length > 0) {
+                        response.data.details.forEach(function(detail) {
+                            let statusBadge = '';
+                            if (detail.status === 'success') {
+                                statusBadge = '<span class="badge bg-success">成功</span>';
+                            } else if (detail.status === 'skipped') {
+                                statusBadge = '<span class="badge bg-warning">跳过</span>';
+                            } else {
+                                statusBadge = '<span class="badge bg-danger">错误</span>';
+                            }
+                            
+                            $('#detailsTable tbody').append(`
+                                <tr>
+                                    <td>${detail.teacher}</td>
+                                    <td>${detail.subject}</td>
+                                    <td>${detail.class_from || '-'}</td>
+                                    <td>${detail.class_to || '-'}</td>
+                                    <td>${statusBadge}</td>
+                                    <td>${detail.reason || '-'}</td>
+                                </tr>
+                            `);
+                        });
+                    } else {
+                        $('#detailsTable tbody').append(`
+                            <tr>
+                                <td colspan="6" class="text-center">没有详细记录</td>
+                            </tr>
+                        `);
+                    }
+                    
+                    // 滚动到结果区域
+                    $('html, body').animate({
+                        scrollTop: $('#resultCard').offset().top - 100
+                    }, 500);
+                    
+                    // 显示成功消息
+                    Swal.fire({
+                        icon: 'success',
+                        title: '成功',
+                        text: response.message,
+                        confirmButtonText: '确定'
+                    });
+                } else {
+                    Swal.fire({
+                        icon: 'error',
+                        title: '错误',
+                        text: response.message,
+                        confirmButtonText: '确定'
+                    });
+                }
+            },
+            error: function(xhr) {
+                Swal.fire({
+                    icon: 'error',
+                    title: '错误',
+                    text: '请求失败，请稍后重试',
+                    confirmButtonText: '确定'
+                });
+            }
+        });
+    });
+});
+</script>
+{% endblock %} 

@@ -1,0 +1,1 @@
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "evaluation_system.settings") 

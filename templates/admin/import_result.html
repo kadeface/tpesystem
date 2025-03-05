@@ -1,0 +1,54 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" type="text/css" href="{% static 'admin/css/forms.css' %}">
+  <style type="text/css">
+    /* 内联样式替代CSS文件 */
+    .content-wrapper {
+      width: 100%;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    /* ...更多样式... */
+  </style>
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{{ admin_index_url }}">首页</a>
+  &rsaquo; <a href="{% url 'import-data' %}">数据导入工具</a>
+  &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main" class="content-wrapper">
+  <div class="page-header">
+    <h1>{{ title }}</h1>
+  </div>
+  
+  <div class="result-container">
+    <div class="result-header">
+      <h2>导入结果</h2>
+    </div>
+    
+    <div class="result-body">
+      {% if error %}
+        <div class="result-error">
+          <strong>错误:</strong> {{ error }}
+        </div>
+      {% endif %}
+      
+      <h3>导入过程输出:</h3>
+      <div class="result-output">{{ output }}</div>
+    </div>
+    
+    <div class="result-footer">
+      <a href="javascript:history.go(-2);" class="btn-primary">返回导入页面</a>
+    </div>
+  </div>
+</div>
+{% endblock %} 
