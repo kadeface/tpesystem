@@ -17,6 +17,7 @@ from django.views.generic import RedirectView
 from core.models import DataImportTool
 from django.conf import settings
 from django.conf.urls.static import static
+from api.views import import_progress
 
 router = DefaultRouter()
 router.register(r'regions', RegionViewSet)
@@ -36,6 +37,7 @@ urlpatterns = [
     path('import-data/', admin_site.admin_view(DataImportToolAdmin.get_import_data_view), name='import-data'),
     path('import-scores/', admin_site.admin_view(DataImportToolAdmin.get_import_scores_view), name='import-scores'),
     path('import-teacher-subjects/', admin_site.admin_view(DataImportToolAdmin.get_import_teacher_subjects_view), name='import-teacher-subjects'),
+    path('api/import-progress/<uuid:task_id>/', import_progress, name='import-progress'),
 ]
 
 # 仅在开发环境中添加媒体文件URL

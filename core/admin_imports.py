@@ -11,23 +11,19 @@ from django.shortcuts import render, redirect
 from django.contrib import messages
 from django.conf import settings
 from django.core.files.storage import FileSystemStorage
-from django.http import HttpResponseRedirect, JsonResponse
+
 import tempfile
 import os
 import io
 import time
 import threading
 import uuid
-from django.urls import reverse
-import sys
-
-from .tasks import run_import_task_async, run_import_task_async_session
-from .utils.session_progress_tracker import SessionProgressTracker
+from .tasks import run_import_task_async
 
 # 导入admin_site
-from .admin_site import admin_site
-from .models import Subject, Semester, Region, Exam, DataImportTool, Teacher
-from .management.commands.import_scores import Command as ImportScoresCommand
+
+from .models import  Semester, Region, Teacher
+
 from .management.commands.import_teacher_subjects import Command as ImportTeacherSubjectsCommand
 
 
