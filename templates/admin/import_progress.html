@@ -109,7 +109,9 @@
       
       // 添加时间戳避免缓存
       const timestamp = new Date().getTime();
-      const url = `/core/api/import-progress/?task_id=${taskId}&_=${timestamp}`;
+      
+      // 统一使用正确的API端点 - 修复API路径
+      const url = `/api/import-progress/${taskId}/`;
       
       // 添加调试日志
       console.log(`正在请求进度数据: ${url}`);
@@ -152,20 +154,22 @@
         }
         
         // 更新消息
-        document.getElementById('progress-message').textContent = data.message;
+        document.getElementById('progress-message').textContent = data.message || '正在处理...';
         
         // 更新日志
         const logContainer = document.getElementById('progress-log');
         logContainer.innerHTML = '';
-        data.details.forEach(detail => {
-          const logLine = document.createElement('div');
-          logLine.className = 'progress-log-line';
-          logLine.textContent = detail;
-          logContainer.appendChild(logLine);
-        });
-        
-        // 滚动到日志底部
-        logContainer.scrollTop = logContainer.scrollHeight;
+        if (data.details && Array.isArray(data.details)) {
+          data.details.forEach(detail => {
+            const logLine = document.createElement('div');
+            logLine.className = 'progress-log-line';
+            logLine.textContent = detail;
+            logContainer.appendChild(logLine);
+          });
+          
+          // 滚动到日志底部
+          logContainer.scrollTop = logContainer.scrollHeight;
+        }
         
         // 显示错误（如果有）
         const errorContainer = document.getElementById('progress-error');
@@ -190,6 +194,10 @@
         }
         
         console.error('获取进度错误:', error);
+        console.error('错误类型:', error.name);
+        console.error('错误消息:', error.message);
+        console.error('堆栈:', error.stack);
+        
         // 打印当前页面的会话ID和任务ID，帮助调试
         console.error(`会话ID: ${document.getElementById('session-key').textContent}`);
         console.error(`任务ID: ${taskId}`);
@@ -213,48 +221,20 @@
     // 刷新按钮
     document.getElementById('refresh-btn').addEventListener('click', updateProgress);
   });
-
-  // 在控制台添加调试信息
-  function checkProgress() {
-    console.log('检查导入进度：' + taskId);
-    $.get('/core/api/import-progress/?task_id=' + taskId)
-        .done(function(data) {
-            console.log('获取到进度数据:', data);
-            // 更新进度条
-            updateProgressBar(data.percent);
-            updateProgressMessage(data.message);
-            
-            if(data.status === 'COMPLETED') {
-                // 导入完成，显示成功消息
-                showCompletionMessage();
-            } else if(data.status === 'FAILED') {
-                // 导入失败，显示错误信息
-                showErrorMessage(data.errors);
-            } else {
-                // 继续轮询
-                setTimeout(checkProgress, 2000);
-            }
-        })
-        .fail(function(xhr, status, error) {
-            console.error('获取进度信息失败:', error);
-            // 继续尝试
-            setTimeout(checkProgress, 5000);
-        });
-  }
 </script>
 {% endblock %}
 
 {% block content %}
 <div class="progress-container">
   <h1>导入任务进度</h1>
-  <p>任务ID: {{ task_id }}</p>
+  <p>任务ID: <span style="font-family: monospace;">{{ task_id }}</span></p>
   
   <!-- 添加调试信息 -->
   <div id="debug-info" style="background: #f8f8f8; padding: 10px; margin-bottom: 15px; border: 1px solid #ddd;">
     <p>当前时间: <span id="current-time"></span></p>
     <p>页面加载时间: {{ now }}</p>
     <p>上次API调用: <span id="last-api-call">尚未调用</span></p>
-    <p>会话ID: {{ session_key }}</p>
+    <p>会话ID: <span style="font-family: monospace;">{{ session_key }}</span></p>
   </div>
   
   <div class="progress-message" id="progress-message">正在加载进度信息...</div>
@@ -276,12 +256,19 @@
   
   <!-- 添加测试链接 -->
   <div style="margin-top: 10px;">
-    <a href="/api/import-progress/{{task_id}}/" target="_blank">直接测试API</a>
+    <a href="/api/import-progress/{{task_id}}/" target="_blank">直接测试API</a> 
+    (统一的API路径)
   </div>
   
   <!-- 添加文件备份测试链接 -->
   <div style="margin-top: 5px;">
     <a href="/media/progress/{{task_id}}.json" target="_blank">查看文件系统备份</a>
+  </div>
+  
+  <!-- 添加调试链接 -->
+  <div style="margin-top: 5px;">
+    <a href="/core/api/import-progress/?task_id={{task_id}}" target="_blank">原始API路径</a> 
+    (测试用)
   </div>
   
   <!-- 添加手动触发按钮 -->
