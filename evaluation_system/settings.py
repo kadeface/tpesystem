@@ -132,4 +132,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # 在settings.py中添加
 MEDIA_URL = '/media/'
-MEDIA_ROOT = os.path.join(BASE_DIR, 'media') 
+MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+
+DEFAULT_CHARSET = 'utf-8'
+FILE_CHARSET = 'utf-8'

@@ -7,7 +7,7 @@ import logging
 import time
 from django.core.cache import cache
 import json
-
+import locale
 # 配置根日志记录器
 logging.basicConfig(level=logging.DEBUG, 
                    format='[%(asctime)s] %(message)s',
@@ -255,12 +255,19 @@ def run_import_task_async(file_path, exam_id, exam_name, exam_type, semester,
         # 记录执行命令
         cmd_str = ' '.join(args)
         logger.info(f"执行命令: {cmd_str}")
-        
+
+        env = os.environ.copy()
+        env.update({
+            'PYTHONIOENCODING': 'utf-8',  # 强制子进程使用UTF-8输出
+            'PYTHONUTF8': '1'  # 对于Python 3.7+ 确保UTF-8模式
+        })
+
         # 启动子进程运行导入命令
         process = subprocess.Popen(
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=env,
             text=False,  # 使用二进制模式
             bufsize=1    # 行缓冲
         )
@@ -387,15 +394,23 @@ def run_import_task_async_session(file_path, exam_id, exam_name, exam_type, seme
         # 添加更详细的日志
         print(f"执行命令: {' '.join(args)}")
 
+        env = os.environ.copy()
+        env.update({
+            'PYTHONIOENCODING': 'utf-8',  # 强制子进程使用UTF-8输出
+            'PYTHONUTF8': '1'  # 对于Python 3.7+ 确保UTF-8模式
+        })
+
         # 启动子进程运行导入命令
         process = subprocess.Popen(
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=env,  # 添加环境变量
             text=False,  # 使用二进制模式
             bufsize=1    # 行缓冲
         )
-
+        # 在循环读取输出的部分修改：
+        sys_encoding = locale.getpreferredencoding()
         # 实时读取输出
         while True:
             output = process.stdout.readline()
@@ -403,12 +418,12 @@ def run_import_task_async_session(file_path, exam_id, exam_name, exam_type, seme
                 break
             if output:
                 try:
-                    # 尝试使用多种编码解码
-                    decoded_output = output.decode('utf-8', errors='replace').strip()
+                    # 优先尝试系统编码解码
+                    decoded_output = output.decode(sys_encoding, errors='replace').strip()
                 except UnicodeDecodeError:
                     try:
-                        # 如果utf-8失败，尝试使用cp936（中文Windows系统）
-                        decoded_output = output.decode('cp936', errors='replace').strip()
+                        # 其次尝试UTF-8
+                        decoded_output = output.decode('utf-8', errors='replace').strip()
                     except:
                         # 最后的后备方案
                         decoded_output = repr(output)
