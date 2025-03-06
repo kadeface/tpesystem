@@ -19,7 +19,8 @@ import hashlib
 from core.models import Score, Student, School, StudentHistory, Exam, Subject, Grade, Class, Semester
 from datetime import datetime, timedelta
 import pandas as pd
-from scipy import stats
+from scipy import stats as scipy_stats
+from core.utils.progress_tracker import ProgressTracker
 
 class Command(BaseCommand):
     """
@@ -63,6 +64,7 @@ class Command(BaseCommand):
         parser.add_argument('--create_students', action='store_true', help='自动创建不存在的学生记录')
         parser.add_argument('--update_students', action='store_true', help='更新已存在的学生信息')
         parser.add_argument('--force', action='store_true', help='强制导入，不进行数据检查')
+        parser.add_argument('--task_id', type=str, help='任务ID，用于进度跟踪')
 
     def _extract_id_info(self, id_number):
         """
@@ -444,12 +446,35 @@ class Command(BaseCommand):
         ))
         return students
 
-    def _create_exams(self, subject_mapping, exam_id, exam_name, exam_type, grades, semester, debug=False):
+    def _create_exams(self, subject_mapping, exam_id, exam_name, exam_type, grades, semester_id, debug=False):
         """
         创建考试记录。
+        
+        Args:
+            subject_mapping: 学科映射字典
+            exam_id: 考试ID
+            exam_name: 考试名称
+            exam_type: 考试类型
+            grades: 年级字典
+            semester_id: 学期ID字符串
+            debug: 是否启用调试模式
         """
         self.stdout.write("步骤5: 创建考试记录...")
         exams = {}
+        
+        # 先获取学期对象，以便后续使用
+        try:
+            semester = Semester.objects.get(semester_id=semester_id)
+        except Semester.DoesNotExist:
+            self.stdout.write(self.style.WARNING(f"学期ID {semester_id} 不存在，将尝试创建"))
+            # 创建默认学期（如有必要）
+            semester = Semester.objects.create(
+                semester_id=semester_id,
+                year=semester_id.split('-')[0],
+                term=semester_id.split('-')[1],
+                start_date=date(2023, 1, 1),
+                end_date=date(2023, 12, 31)
+            )
         
         # 获取当前日期时间作为考试时间
         now = datetime.now()
@@ -465,9 +490,6 @@ class Command(BaseCommand):
                 grade_level = grade.grade_name.replace('年级', '')
                 
                 # 修改考试ID的生成方式，使用更短的格式
-                # 原格式: {exam_id}_{subject_id}_{school_id}_{grade_level}
-                # 新格式: {exam_id}_{subject_id}_{短学校ID}
-                # 其中短学校ID只取最后4位数字（如果有的话）
                 short_school_id = school_id[-4:] if len(school_id) > 4 else school_id
                 exam_full_id = f"{exam_id}_{subject_id}_{short_school_id}"
                 
@@ -479,14 +501,14 @@ class Command(BaseCommand):
                             'exam_type': exam_type,
                             'subject': subject,
                             'grade': grade,
-                            'semester': semester,
+                            'semester': semester,  # 使用semester对象而不是semester_id
                             'start_time': start_time,
                             'end_time': end_time,
-                            'total_score': 100.0,  # 默认总分为100
+                            'total_score': 100.0,
                             'status': 'ACTIVE',
                             'grade_id': grade.grade_id,
-                            'semester_id': semester.semester_id,
-                            'subject_id': subject_id
+                            'subject_id': subject_id,
+                            'semester_id': semester_id  # 保留这个字段以保持兼容性
                         }
                     )
                     
@@ -497,20 +519,55 @@ class Command(BaseCommand):
                 
                 except Exception as e:
                     self.stdout.write(self.style.ERROR(f"  创建考试失败: {str(e)}"))
-                    # 在遇到错误时打印出完整的ID以便调试
                     self.stdout.write(self.style.ERROR(f"  尝试创建的考试ID: {exam_full_id} (长度: {len(exam_full_id)})"))
                     raise
         
         self.stdout.write(self.style.SUCCESS(f"  完成考试创建: 共 {len(exams)} 个考试记录"))
         return exams
 
-    def _import_scores(self, df, students, exams, subject_mapping, teacher, skip_teacher, debug=False):
+    def _import_scores(self, df, students, exams, subject_mapping, teacher_id, skip_teacher, debug=False):
         """
         导入成绩数据。
+        
+        Args:
+            df: 数据DataFrame
+            students: 学生字典
+            exams: 考试字典
+            subject_mapping: 科目映射
+            teacher_id: 教师ID字符串 (不是Teacher对象)
+            skip_teacher: 是否跳过教师关联
+            debug: 是否启用调试模式
+        
+        Returns:
+            tuple: (created_count, updated_count)
         """
         self.stdout.write("步骤6: 导入成绩数据...")
         created_count = 0
         updated_count = 0
+        
+        # 获取Teacher对象（如果不跳过教师）
+        teacher = None
+        if not skip_teacher and teacher_id:
+            try:
+                teacher = Teacher.objects.get(teacher_id=teacher_id)
+            except Teacher.DoesNotExist:
+                if debug:
+                    self.stdout.write(self.style.WARNING(f"  未找到教师: ID={teacher_id}，成绩将不关联教师"))
+        
+        # 添加：初始化subject_scores
+        subject_scores = {}
+        
+        # 添加：收集每个科目的所有分数
+        for _, row in df.iterrows():
+            for subject_key, (subject_id, subject_name) in subject_mapping.items():
+                if subject_key in row and pd.notna(row[subject_key]):
+                    try:
+                        score_value = float(row[subject_key])
+                        if subject_id not in subject_scores:
+                            subject_scores[subject_id] = []
+                        subject_scores[subject_id].append(score_value)
+                    except (ValueError, TypeError):
+                        continue
         
         # 添加调试信息
         if debug:
@@ -606,7 +663,7 @@ class Command(BaseCommand):
                             'teacher': None if skip_teacher else teacher,
                             'raw_score': score_value,
                             'standard_score': score_value,  # 添加标准分，默认与原始分相同
-                            'percentile': 0,
+                            'percentile': scipy_stats.percentileofscore(subject_scores[subject_id], score_value) if subject_id in subject_scores else 50,
                             'grade': score_grade,
                             'status': 'ACTIVE'
                         }
@@ -639,6 +696,16 @@ class Command(BaseCommand):
         Raises:
             CommandError: 当导入过程出错时抛出
         """
+        # 获取任务ID
+        task_id = options.get('task_id')
+        
+        # 初始化进度跟踪器（如果提供了任务ID）
+        self.tracker = None
+        if task_id:
+            from core.utils.progress_tracker import ProgressTracker
+            self.tracker = ProgressTracker(task_id)
+            self.tracker.update(message='开始加载数据文件...')
+        
         file_path = options.get('file_path')
         exam_id = options['exam_id']
         exam_name = options['exam_name']
@@ -668,6 +735,7 @@ class Command(BaseCommand):
             
             # 检查并创建学期（如果不存在）
             try:
+                semester_id = self.convert_semester_format(semester_id)
                 semester = Semester.objects.get(semester_id=semester_id)
             except Semester.DoesNotExist:
                 current_year = int(semester_id.split('-')[0])
@@ -845,24 +913,78 @@ class Command(BaseCommand):
             # 处理完成后输出优化的统计结果
             #self._print_import_summary(import_stats)
             
+            # 在处理过程中更新进度
+            # 例如，在处理学校前：
+            if self.tracker:
+                self.tracker.update(current=1, total=6, message='正在导入学校数据...')
+            
+            # 在处理年级前：
+            if self.tracker:
+                self.tracker.update(current=2, total=6, message='正在导入年级数据...')
+            
+            # 以此类推...
+            
+            # 完成时：
+            if self.tracker:
+                self.tracker.complete('导入成功完成！')
+            
         except Exception as e:
             raise CommandError(f'导入过程出错: {str(e)}')
 
     def _standard_import(self, df, exam_id, exam_name, exam_type, semester_id, teacher_id, region_id, 
                         create_students, update_students, skip_teacher, smart_match, debug):
         """标准导入逻辑，用于活跃学期"""
-        # 现有的导入步骤...
+        # 获取学期对象
+        try:
+            semester = Semester.objects.get(semester_id=semester_id)
+        except Semester.DoesNotExist:
+            raise CommandError(f"找不到学期: {semester_id}")
+        
+        # 定义subject_mapping
+        subject_mapping = {}
+        for column in df.columns:
+            subject = self._match_subject(column)
+            if subject:
+                subject_mapping[column] = (subject.subject_id, subject.subject_name)
+        
+        if debug:
+            self.stdout.write(f"检测到以下学科: {list(subject_mapping.keys())}")
+        
+        # 导入步骤...
         schools, school_count = self._import_schools(df, region_id, debug)
-        grades, grade_count = self._import_grades(df, schools, semester_id, debug)
+        
+        # 使用semester对象而不是semester_id字符串
+        grades, grade_count = self._import_grades(df, schools, semester, debug)
+        
         classes, class_count = self._import_classes(df, grades, teacher_id, debug)
-        # ... 其他导入步骤 ...
+        
+        students = self._import_students(df, schools, grades, classes, create_students, update_students, region_id, debug)
+        
+        # 使用semester_id字符串
+        exams = self._create_exams(subject_mapping, exam_id, exam_name, exam_type, grades, semester_id, debug)
+        
+        # 导入成绩
+        scores_created, scores_updated = self._import_scores(df, students, exams, subject_mapping, teacher_id, skip_teacher, debug)
+        
+        return {
+            'schools': school_count,
+            'grades': grade_count,
+            'classes': class_count,
+            'students_created': 0,  # 后续需要完善
+            'students_updated': 0,  # 后续需要完善
+            'scores_created': scores_created,
+            'scores_updated': scores_updated
+        }
 
     def _historical_import(self, df, semester_id, exam_id, exam_name, exam_type, teacher_id, skip_teacher, region_id, create_students, update_students, force=False, debug=False):
         """历史数据导入逻辑，用于非活跃学期"""
         self.stdout.write("使用历史记录导入模式...")
         
-
-           # 初始化统计计数器
+        # 初始化进度跟踪
+        if hasattr(self, 'tracker') and self.tracker:
+            self.tracker.update(message="开始历史数据导入...", current=0, total=6)
+        
+        # 初始化统计计数器
         stats = {
             'schools_created': 0,
             'grades_created': 0,
@@ -873,8 +995,18 @@ class Command(BaseCommand):
             'scores_updated': 0,
             'errors': 0
         }
+        
         # 尝试转换学期格式
-        semester_id = self.convert_semester_format(semester_id)
+        #semester_id = self.convert_semester_format(semester_id)
+        
+        # 获取学期对象
+        try:
+            semester = Semester.objects.get(semester_id=semester_id)
+        except Semester.DoesNotExist:
+            # 尝试查找匹配的学期
+            semesters = Semester.objects.all()
+            # 尝试智能匹配...
+            raise CommandError(f"无法找到学期: {semester_id}")
         
         # 添加此代码 - 在方法内部定义subject_mapping
         subject_mapping = {}
@@ -883,16 +1015,11 @@ class Command(BaseCommand):
             if subject:
                 subject_mapping[column] = (subject.subject_id, subject.subject_name)
         
-        try:
-            semester = Semester.objects.get(semester_id=semester_id)
-        except Semester.DoesNotExist:
-            # 尝试查找匹配的学期
-            semesters = Semester.objects.all()
-            # 尝试智能匹配...
-            pass
-        
         # 第1步：从Excel收集所有学校信息并创建
         self.stdout.write("步骤1: 导入学校数据...")
+        if hasattr(self, 'tracker') and self.tracker:
+            self.tracker.update(message="步骤1: 导入学校数据...", current=1, total=6)
+        
         school_map = {}  # 存储学校ID到School对象的映射
         if '学校代码' in df.columns and '学校名称' in df.columns:
             school_groups = df.groupby(['学校代码', '学校名称'])
@@ -921,6 +1048,9 @@ class Command(BaseCommand):
         
         # 第2步：创建年级记录
         self.stdout.write("步骤2: 导入年级数据...")
+        if hasattr(self, 'tracker') and self.tracker:
+            self.tracker.update(message="步骤2: 导入年级数据...", current=2, total=6)
+        
         grade_map = {}  # 存储(学校ID, 年级级别) -> Grade对象的映射
         if '年级' in df.columns and '学校代码' in df.columns:
             # 按学校和年级分组
@@ -965,6 +1095,9 @@ class Command(BaseCommand):
         
         # 第3步：创建班级记录
         self.stdout.write("步骤3: 导入班级数据...")
+        if hasattr(self, 'tracker') and self.tracker:
+            self.tracker.update(message="步骤3: 导入班级数据...", current=3, total=6)
+        
         class_map = {}  # 存储(学校ID, 年级级别, 班别) -> Class对象的映射
         if '班别' in df.columns and '年级' in df.columns and '学校代码' in df.columns:
             # 按学校、年级和班级分组
@@ -1008,10 +1141,10 @@ class Command(BaseCommand):
         
         self.stdout.write(self.style.SUCCESS(f"  完成班级导入: 新建 {stats['classes_created']} 个班级"))
         
-
-        
         # 第4步：创建考试记录（现在已确保年级存在）
         self.stdout.write("步骤4: 创建考试记录...")
+        if hasattr(self, 'tracker') and self.tracker:
+            self.tracker.update(message="步骤4: 创建考试记录...", current=4, total=6)
 
         # 如果有年级记录，使用第一个年级作为默认关联
         default_grade_id = 'G0001'  # 默认值
@@ -1039,6 +1172,9 @@ class Command(BaseCommand):
         
         # 第5步之前，先收集所有科目的分数用于计算Z分
         self.stdout.write("步骤4.5: 计算各科目Z分...")
+        if hasattr(self, 'tracker') and self.tracker:
+            self.tracker.update(message="步骤4.5: 计算各科目Z分...", current=4.5, total=6)
+        
         subject_scores = {}
         
         # 首先收集每个科目的所有原始分数
@@ -1065,6 +1201,9 @@ class Command(BaseCommand):
         
         # 第5步：导入学生记录和成绩
         self.stdout.write("步骤5: 导入学生和成绩数据...")
+        if hasattr(self, 'tracker') and self.tracker:
+            self.tracker.update(message="步骤5: 导入学生和成绩数据...", current=5, total=6)
+        
         historical_count = 0
         
         # 进度显示变量
@@ -1076,6 +1215,15 @@ class Command(BaseCommand):
             if idx % progress_step == 0 and idx > 0:
                 progress_percent = (idx / total_records) * 100
                 self.stdout.write(f"  处理进度: {progress_percent:.1f}% ({idx}/{total_records})")
+                
+                # 更新进度跟踪器
+                if hasattr(self, 'tracker') and self.tracker:
+                    sub_progress = 5 + (idx / total_records)  # 5到6之间的值
+                    self.tracker.update(
+                        message=f"正在处理学生和成绩数据... {progress_percent:.1f}% ({idx}/{total_records})",
+                        current=sub_progress,
+                        total=6
+                    )
             
             # 获取学生基本信息
             student_id = str(row.get('考生号', '')).strip()
@@ -1228,7 +1376,7 @@ class Command(BaseCommand):
                                 'subject_id': subject_id,
                                 'raw_score': score_value,
                                 'standard_score': standard_score,  # 使用计算的标准分
-                                'percentile': stats.percentileofscore(subject_scores[subject_id], score_value) if subject_id in subject_scores else 50,
+                                'percentile': scipy_stats.percentileofscore(subject_scores[subject_id], score_value) if subject_id in subject_scores else 50,
                                 'status': 'COMPLETE',
                                 'semester_id': semester_id
                             }
@@ -1261,6 +1409,14 @@ class Command(BaseCommand):
         self.stdout.write("="*80)
         
         self.stdout.write(self.style.SUCCESS(f"历史导入完成，共处理 {historical_count} 条记录"))
+        
+        # 完成导入，更新进度跟踪器
+        if hasattr(self, 'tracker') and self.tracker:
+            self.tracker.update(
+                message=f"导入完成！共处理 {historical_count} 条记录，创建 {stats['scores_created']} 条成绩",
+                current=6,
+                total=6
+            )
         
         return stats
 
@@ -1301,11 +1457,11 @@ class Command(BaseCommand):
             # 高中学科
             '数学(文)': ('MATH_L', '数学(文科)'),
             '数学(理)': ('MATH_S', '数学(理科)'),
-            '物理(必修)': ('PHY_E', '物理(必修)'),
+            '物理(选修)': ('PHY_E', '物理(选修)'),
             '化学(选修)': ('CHEM_E', '化学(选修)'),
             '生物(选修)': ('BIO_E', '生物(选修)'),
-            '政治(选修)': ('POL', '政治（选修）'),
-            '历史(必修)': ('HIS_E', '历史(必修)'),
+            '政治(选修)': ('POL', '政治'),
+            '历史(选修)': ('HIS_E', '历史(选修)'),
             '地理(选修)': ('GEO_E', '地理(选修)'),
             '通用技术': ('TECH', '通用技术'),
             
@@ -1435,4 +1591,15 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR(f"错误数量: {stats.get('errors', 0)} 条"))
         else:
             self.stdout.write(f"错误数量: 0 条")
-        self.stdout.write("="*80) 
+        self.stdout.write("="*80)     # 重写输出方法，将输出同时发送到控制台和进度跟踪器
+    def stdout_write(self, message, style=None):
+        if style:
+            styled_message = getattr(self.style, style)(message)
+            self.stdout.write(styled_message)
+        else:
+            self.stdout.write(message)
+        
+        # 如果有进度跟踪器，也更新进度消息
+        if hasattr(self, 'tracker') and self.tracker:
+            self.tracker.update(message=message) 
+

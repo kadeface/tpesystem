@@ -4,15 +4,27 @@
 {% block extrastyle %}
   {{ block.super }}
   <link rel="stylesheet" type="text/css" href="{% static 'admin/css/forms.css' %}">
-  <style type="text/css">
-    /* 内联样式替代CSS文件 */
-    .content-wrapper {
-      width: 100%;
-      max-width: 800px;
-      margin: 0 auto;
+  <style>
+    .import-result {
+      margin: 20px 0;
       padding: 20px;
+      background-color: #f9f9f9;
+      border-radius: 5px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
     }
-    /* ...更多样式... */
+    
+    .result-log {
+      font-family: monospace;
+      font-size: 13px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      max-height: 500px;
+      overflow-y: auto;
+      background-color: #fff;
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 3px;
+    }
   </style>
 {% endblock %}
 
@@ -25,30 +37,14 @@
 {% endblock %}
 
 {% block content %}
-<div id="content-main" class="content-wrapper">
-  <div class="page-header">
-    <h1>{{ title }}</h1>
-  </div>
+<div class="import-result">
+  <h1>导入结果</h1>
   
-  <div class="result-container">
-    <div class="result-header">
-      <h2>导入结果</h2>
-    </div>
-    
-    <div class="result-body">
-      {% if error %}
-        <div class="result-error">
-          <strong>错误:</strong> {{ error }}
-        </div>
-      {% endif %}
-      
-      <h3>导入过程输出:</h3>
-      <div class="result-output">{{ output }}</div>
-    </div>
-    
-    <div class="result-footer">
-      <a href="javascript:history.go(-2);" class="btn-primary">返回导入页面</a>
-    </div>
+  <div class="result-log">{{ result|linebreaks }}</div>
+  
+  <div style="margin-top: 20px;">
+    <a href="{% url 'admin:index' %}" class="button">返回管理页面</a>
+    <a href="{% url 'admin:core_dataimporttool_changelist' %}" class="button">返回导入工具</a>
   </div>
 </div>
 {% endblock %} 

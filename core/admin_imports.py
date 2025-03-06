@@ -17,6 +17,12 @@ import os
 import io
 import time
 import threading
+import uuid
+from django.urls import reverse
+import sys
+
+from .tasks import run_import_task_async, run_import_task_async_session
+from .utils.session_progress_tracker import SessionProgressTracker
 
 # 导入admin_site
 from .admin_site import admin_site
@@ -319,6 +325,15 @@ class ImportDataAdmin(admin.ModelAdmin):
                 file_name = fs.save(file.name, file)
                 file_path = os.path.join(settings.MEDIA_ROOT, file_name)
                 
+                # 添加调试输出
+                print("===== 表单数据 =====")
+                print(f"文件名: {file.name}, 大小: {file.size}")
+                print(f"考试ID: {exam_id}")
+                print(f"考试名称: {exam_name}")
+                print(f"学期: {semester}")
+                print(f"教师ID: {teacher_id}")
+                # ...其他字段...
+                
                 # 添加开始处理提示
                 print(f"开始处理文件: {file_path}")
                 
@@ -363,73 +378,21 @@ class ImportDataAdmin(admin.ModelAdmin):
                     }
                     request.session.save()
                 
-                # 在新线程中执行导入
-                def run_import():
-                    try:
-                        # 更新进度
-                        update_progress(1, 10, '验证并处理Excel文件...')
-                        time.sleep(1)  # 给UI时间更新
-                        
-                        # 从界面获取的学期格式："2022-2023学年第2学期"
-                        semester_display = request.POST.get('semester')
-                        
-                        # 转换为数据库格式："2022-2023-2"
-                        semester_id = convert_semester_format(semester_display)
-                        
-                        # 调用导入命令
-                        call_command(
-                            'import_scores',
-                            file_path=file_path,
-                            exam_id=exam_id,
-                            exam_name=exam_name,
-                            semester=semester_id,
-                            exam_type=exam_type,
-                            teacher_id=teacher_id,  # 确保传递有效的teacher_id
-                            region_id=region.region_id,
-                            create_students=create_students,
-                            update_students=update_students,
-                            skip_teacher=skip_teacher,
-                            sheet=sheet_name,
-                            debug=debug,
-                            smart_match=smart_match,  # 添加smart_match参数
-                            force=force,  # 添加force参数
-                            stdout=output,
-                            stderr=output
-                        )
-                        
-                        # 添加完成处理提示
-                        print(f"文件处理完成: {file_path}")
-                        
-                        # 美化输出结果
-                        result_output = output.getvalue()
-                        
-                        # 导入完成
-                        import_complete(output)
-                        
-                        return render(request, 'admin/import_success.html', {
-                            'title': '导入成功',
-                            'output': result_output,
-                            'processing_time': time.time() - start_time  # 添加处理时间
-                        })
-                    except Exception as e:
-                        # 返回错误页面
-                        request.session['import_progress'] = {
-                            'is_complete': True,
-                            'error': str(e)
-                        }
-                        request.session.save()
-                        return render(request, 'admin/import_error.html', {
-                            'error': str(e),
-                            'output': output.getvalue()
-                        })
-                    finally:
-                        # 清理临时文件
-                        if os.path.exists(file_path):
-                            os.remove(file_path)
+                # 创建任务ID
+                task_id = str(uuid.uuid4())
                 
-                # 启动导入线程
-                import_thread = threading.Thread(target=run_import)
-                import_thread.start()
+                # 启动异步任务而非直接执行
+                thread = threading.Thread(
+                    target=run_import_task_async,
+                    args=(file_path, exam_id, exam_name, exam_type, semester.semester_id, 
+                         teacher_id, region.region_id, sheet_name, create_students, 
+                         update_students, skip_teacher, debug, smart_match, force, task_id)
+                )
+                thread.daemon = True
+                thread.start()
+                
+                # 添加调试输出
+                print(f"启动异步任务，任务ID: {task_id}")
                 
                 # 返回确认页面
                 return render(request, 'admin/import_progress.html', {
@@ -556,7 +519,6 @@ class ImportDataAdmin(admin.ModelAdmin):
     @classmethod
     def get_import_scores_view(cls, request):
         """提供成绩导入界面视图"""
-        # 从会话中获取管理站点URL，保持一致性
         admin_index_url = request.session.get('admin_index_url', '/admin/')
         
         if request.method == 'POST':
@@ -593,55 +555,29 @@ class ImportDataAdmin(admin.ModelAdmin):
                 file_name = fs.save(file.name, file)
                 file_path = os.path.join(settings.MEDIA_ROOT, file_name)
                 
-                # 准备命令参数
-                output = io.StringIO()
-                try:
-                    # 创建命令实例并执行
-                    cmd = ImportScoresCommand(stdout=output, stderr=output)
-                    cmd.handle(
-                        file_path=file_path,
-                        exam_id=exam_id,
-                        exam_name=exam_name,
-                        semester=semester.semester_id,
-                        exam_type=exam_type,
-                        teacher_id=teacher_id,  # 确保传递教师ID
-                        region_id=region.region_id,
-                        create_students=create_students,
-                        update_students=update_students,
-                        skip_teacher=skip_teacher,
-                        sheet=sheet_name,
-                        debug=debug,
-                        smart_match=smart_match,
-                        force=force
-                    )
-                    
-                    # 在上下文中添加命令输出
-                    context = {
-                        'title': "成绩数据导入成功",
-                        'output': output.getvalue(),
-                        'admin_index_url': admin_index_url
-                    }
-                    
-                    # 清理临时文件
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                    
-                    return render(request, 'admin/import_result.html', context)
-                    
-                except Exception as e:
-                    # 在上下文中添加错误信息和命令输出
-                    context = {
-                        'title': "成绩数据导入错误",
-                        'error': str(e),
-                        'output': output.getvalue(),
-                        'admin_index_url': admin_index_url
-                    }
-                    
-                    # 清理临时文件
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                    
-                    return render(request, 'admin/import_result.html', context)
+                # 确保使用semester_id
+                semester_id = semester.semester_id if hasattr(semester, 'semester_id') else semester
+                
+                # 创建任务ID
+                task_id = str(uuid.uuid4())
+                
+                # 启动异步任务而非直接执行
+                thread = threading.Thread(
+                    target=run_import_task_async,
+                    args=(file_path, exam_id, exam_name, exam_type, semester_id, 
+                         teacher_id, region.region_id, sheet_name, create_students, 
+                         update_students, skip_teacher, debug, smart_match, force, task_id)
+                )
+                thread.daemon = True
+                thread.start()
+                
+                # 添加调试输出
+                print(f"启动异步任务，任务ID: {task_id}")
+                
+                # 重定向到进度页面
+                return redirect(f"/core/import-progress/?task_id={task_id}")
+                
+        # 显示表单
         else:
             form = ScoresImportForm()
         

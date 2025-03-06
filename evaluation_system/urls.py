@@ -26,6 +26,7 @@ router.register(r'students', StudentViewSet)
 
 urlpatterns = [
     path('', include(router.urls)),
+    path('core/', include('core.urls')),
     path('upload/scores/', ScoreUploadView.as_view(), name='upload-scores'),
     path('admin/', admin_site.urls),
     path('default-admin/', admin.site.urls),

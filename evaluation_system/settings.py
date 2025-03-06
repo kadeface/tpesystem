@@ -9,11 +9,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 CACHES = {
     'default': {
         'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
-        'LOCATION': os.path.abspath('/var/tmp/django_cache'),  # 使用绝对路径
-        'TIMEOUT': 300,  # 5分钟缓存时间
-        'OPTIONS': {
-            'MAX_ENTRIES': 1000
-        }
+        'LOCATION': os.path.join(BASE_DIR, 'django_cache'),
     }
 }
 

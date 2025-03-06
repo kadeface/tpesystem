@@ -14,6 +14,16 @@ from django.db import transaction
 from django.utils import timezone
 from django.core.paginator import Paginator
 from django.db.models import Count
+from django.contrib.admin.views.decorators import staff_member_required
+import uuid
+import os
+import threading
+from django.conf import settings
+from django.urls import reverse
+from django.core.management import call_command
+from django.core.cache import cache
+import json
+from django.views.decorators.http import require_GET, require_POST
 
 class RegionViewSet(viewsets.ModelViewSet):
     """
@@ -438,16 +448,444 @@ def _promote_teachers(from_semester, to_semester, auto_match=False):
         'details': details[:100]  # 最多返回100条详情记录
     } 
 
+@staff_member_required
 def import_scores_view(request):
-    # 查看这个函数中使用的模板
-    return render(request, 'core/import_scores.html', context)  # 实际模板路径在这里 
+    """
+    成绩导入页面 - 同步处理版本
+    """
+    # 当前常规表单处理逻辑
+    
+    if request.method == 'POST':
+        # 处理表单提交
+        # ...表单验证代码...
+        
+        # 创建任务ID
+        task_id = str(uuid.uuid4())
+        
+        # 保存上传的文件
+        file = request.FILES['file']
+        file_path = os.path.join(settings.MEDIA_ROOT, file.name)
+        with open(file_path, 'wb+') as destination:
+            for chunk in file.chunks():
+                destination.write(chunk)
+        
+        # 获取其他表单数据
+        teacher_id = request.POST.get('teacher_id')
+        region_id = request.POST.get('region_id')
+        sheet_name = request.POST.get('sheet', 'sheet1')  # 默认工作表名
+        create_students = request.POST.get('create_students') == 'on'
+        update_students = request.POST.get('update_students') == 'on'
+        skip_teacher = request.POST.get('skip_teacher') == 'on'
+        debug = request.POST.get('debug') == 'on'
+        smart_match = request.POST.get('smart_match') == 'on'
+        force = request.POST.get('force') == 'on'
+        exam_id = request.POST.get('exam_id')
+        exam_name = request.POST.get('exam_name')
+        exam_type = request.POST.get('exam_type')
+        # 确保从POST数据中获取semester
+        semester = request.POST.get('semester')
 
-def import_progress(request):
-    """返回当前导入进度"""
-    progress_data = request.session.get('import_progress', {
-        'current_step': 0,
-        'progress': 0,
-        'message': '未开始',
-        'is_complete': False
+        
+        # 直接调用命令，同步执行
+        try:
+            call_command('import_scores',
+                        file_path=file_path,
+                        exam_id=exam_id,
+                        exam_name=exam_name,
+                        exam_type=exam_type,
+                        semester=semester,  
+                        teacher_id=teacher_id,
+                        region_id=region_id,
+                        sheet=sheet_name,
+                        create_students=create_students,
+                        update_students=update_students,
+                        skip_teacher=skip_teacher,
+                        debug=debug,
+                        smart_match=smart_match,
+                        force=force,
+                        task_id=task_id)
+            
+            # 导入成功
+            messages.success(request, f"成绩导入成功，任务ID: {task_id}")
+            
+        except Exception as e:
+            # 导入失败，显示错误信息
+            messages.error(request, f"导入失败: {str(e)}")
+        
+        # 重定向回导入页面
+        return redirect('admin:import_scores')
+    
+    # 显示导入表单...
+    return render(request, 'admin/import_scores.html', context)
+
+@staff_member_required
+def import_progress_view(request):
+    """
+    导入进度展示页面
+    
+    Args:
+        request: HTTP请求对象
+        
+    Returns:
+        渲染的进度页面
+    """
+    task_id = request.GET.get('task_id', '')
+    return render(request, 'admin/import_progress.html', {
+        'task_id': task_id,
+        'title': '导入进度'
     })
-    return JsonResponse(progress_data) 
+
+@require_GET
+def import_progress(request):
+    """获取导入任务的进度信息"""
+    task_id = request.GET.get('task_id')
+    if not task_id:
+        return JsonResponse({'error': '缺少task_id参数'}, status=400)
+    
+    # 添加请求信息日志
+    print(f"收到进度请求: task_id={task_id}, client={request.META.get('REMOTE_ADDR')}")
+    
+    try:
+        # 设置最大处理时间
+        import time
+        start_time = time.time()
+        
+        # 从缓存获取进度
+        cache_key = f"task_progress_{task_id}"
+        progress_data = cache.get(cache_key)
+        
+        # 如果缓存没有，尝试从文件读取
+        if not progress_data:
+            progress_file = os.path.join(settings.MEDIA_ROOT, 'progress', f"{task_id}.json")
+            if os.path.exists(progress_file):
+                with open(progress_file, 'r', encoding='utf-8') as f:
+                    progress_data = json.load(f)
+            else:
+                # 返回默认进度信息
+                progress_data = {
+                    "status": "PENDING", 
+                    "current": 0, 
+                    "total": 100, 
+                    "percent": 0,
+                    "message": "等待任务开始...", 
+                    "details": [], 
+                    "errors": []
+                }
+                
+        # 检查处理时间
+        processing_time = time.time() - start_time
+        if processing_time > 0.1:  # 如果处理超过100ms，记录日志
+            print(f"进度API处理较慢: {processing_time:.2f}秒, taskId={task_id}")
+            
+        # 返回进度数据
+        return JsonResponse(progress_data)
+    except Exception as e:
+        return JsonResponse({
+            'error': f'获取进度失败: {str(e)}',
+            'status': 'ERROR'
+        }, status=500)
+
+@staff_member_required
+def debug_trigger_task(request):
+    """
+    用于调试的任务触发器
+    
+    Args:
+        request: HTTP请求对象
+        
+    Returns:
+        处理结果的JSON响应
+    """
+    task_id = request.GET.get('task_id', str(uuid.uuid4()))
+    action = request.GET.get('action', 'start')
+    
+    if action == 'start':
+        # 模拟启动一个任务
+        # 实际实现中，您应该调用真实的任务处理函数
+        return JsonResponse({
+            'status': 'success',
+            'message': f'已启动调试任务 {task_id}',
+            'task_id': task_id
+        })
+    elif action == 'complete':
+        # 模拟完成一个任务
+        return JsonResponse({
+            'status': 'success',
+            'message': f'已完成调试任务 {task_id}',
+            'task_id': task_id
+        })
+    elif action == 'fail':
+        # 模拟失败的任务
+        return JsonResponse({
+            'status': 'success',
+            'message': f'已将调试任务 {task_id} 标记为失败',
+            'task_id': task_id
+        })
+    else:
+        return JsonResponse({
+            'status': 'error',
+            'message': f'未知操作: {action}'
+        })
+
+@staff_member_required
+def test_progress_tracker(request):
+    """
+    测试进度跟踪页面
+    
+    Args:
+        request: HTTP请求对象
+        
+    Returns:
+        用于测试进度跟踪功能的页面
+    """
+    # 创建一个测试任务ID，如果没有提供
+    task_id = request.GET.get('task_id', str(uuid.uuid4()))
+    
+    # 获取测试模式
+    mode = request.GET.get('mode', 'demo')
+    
+    context = {
+        'task_id': task_id,
+        'title': '测试进度跟踪器',
+        'mode': mode,
+        'demo_steps': 10 if mode == 'demo' else 0
+    }
+    
+    return render(request, 'admin/test_progress.html', context)
+
+@staff_member_required
+def direct_progress_view(request, task_id):
+    """
+    直接进度查看页面
+    
+    Args:
+        request: HTTP请求对象
+        task_id: 任务ID
+        
+    Returns:
+        渲染的直接进度页面
+    """
+    if not task_id:
+        messages.error(request, '缺少任务ID参数')
+        return redirect('admin:index')
+        
+    return render(request, 'admin/direct_progress.html', {
+        'task_id': task_id,
+        'title': '任务进度查看',
+        'auto_refresh': request.GET.get('refresh', 'true') == 'true'
+    })
+
+@staff_member_required
+def simple_progress_test(request):
+    """
+    简单进度测试页面
+    
+    Args:
+        request: HTTP请求对象
+        
+    Returns:
+        简单的进度测试页面
+    """
+    # 创建一个随机任务ID
+    task_id = str(uuid.uuid4())
+    
+    # 简单的测试上下文
+    context = {
+        'task_id': task_id,
+        'title': '简单进度测试',
+        'timestamp': timezone.now().isoformat()
+    }
+    
+    return render(request, 'admin/simple_progress.html', context)
+
+@staff_member_required
+def start_simple_test(request):
+    """
+    启动简单测试任务
+    
+    Args:
+        request: HTTP请求对象
+        
+    Returns:
+        JSON响应或重定向到测试进度页面
+    """
+    # 创建新的任务ID
+    task_id = str(uuid.uuid4())
+    
+    # 获取任务持续时间参数（默认10秒）
+    duration = int(request.GET.get('duration', 10))
+    
+    # 获取任务步骤数（默认5步）
+    steps = int(request.GET.get('steps', 5))
+    
+    # 是否要求JSON响应
+    json_response = request.GET.get('json', 'false') == 'true'
+    
+    # 模拟启动一个简单测试任务
+    # 实际项目中应该启动一个真实的后台任务
+    
+    if json_response:
+        return JsonResponse({
+            'status': 'success',
+            'message': '简单测试任务已启动',
+            'task_id': task_id,
+            'details': {
+                'duration': duration,
+                'steps': steps,
+                'start_time': timezone.now().isoformat()
+            }
+        })
+    else:
+        # 重定向到进度查看页面
+        return redirect(f"{reverse('simple_progress_test')}?task_id={task_id}&duration={duration}&steps={steps}")
+
+@staff_member_required
+def check_simple_test(request):
+    """
+    检查简单测试任务进度
+    
+    Args:
+        request: HTTP请求对象
+        
+    Returns:
+        包含任务进度信息的JSON响应
+    """
+    task_id = request.GET.get('task_id', '')
+    if not task_id:
+        return JsonResponse({
+            'status': 'error',
+            'message': '缺少任务ID参数'
+        })
+    
+    # 在实际应用中，应该从存储中(如Redis或数据库)获取任务进度
+    # 这里只返回模拟数据
+    
+    # 获取当前时间，用于模拟进度计算
+    current_time = timezone.now()
+    
+    # 获取任务开始时间(这里模拟一个开始时间)
+    # 在实际应用中应该从存储中获取真实的开始时间
+    start_time = current_time - timezone.timedelta(seconds=30)
+    
+    # 获取任务配置参数(在实际应用中应该从存储中获取)
+    duration = int(request.GET.get('duration', 10))
+    steps = int(request.GET.get('steps', 5))
+    
+    # 计算经过的时间(秒)
+    elapsed_seconds = (current_time - start_time).total_seconds()
+    
+    # 计算进度百分比(0-100)
+    progress_percent = min(100, int((elapsed_seconds / duration) * 100))
+    
+    # 计算当前步骤
+    current_step = min(steps, int((progress_percent / 100) * steps) + 1)
+    
+    # 确定任务状态
+    task_status = 'running'
+    if progress_percent >= 100:
+        task_status = 'completed'
+    
+    # 构建响应数据
+    response_data = {
+        'status': 'success',
+        'task_id': task_id,
+        'progress': {
+            'percent': progress_percent,
+            'current_step': current_step,
+            'total_steps': steps,
+            'elapsed_time': elapsed_seconds,
+            'status': task_status,
+            'message': f'正在执行步骤 {current_step}/{steps}' if task_status == 'running' else '任务已完成'
+        }
+    }
+    
+    return JsonResponse(response_data)
+
+def run_import_task_async(file_path, exam_id, exam_name, exam_type, semester_id, teacher_id, 
+                         region_id, sheet_name, create_students, update_students, 
+                         skip_teacher, debug, smart_match, force, task_id):
+    """
+    异步执行成绩导入任务。
+    
+    Args:
+        file_path: 文件路径
+        exam_id: 考试ID
+        exam_name: 考试名称
+        exam_type: 考试类型
+        semester_id: 学期ID字符串
+        teacher_id: 教师ID
+        region_id: 区域ID
+        sheet_name: Excel工作表名称
+        create_students: 是否创建新学生
+        update_students: 是否更新学生信息
+        skip_teacher: 是否跳过教师关联
+        debug: 是否开启调试模式
+        smart_match: 是否启用智能匹配
+        force: 是否强制导入
+        task_id: 任务ID
+    """
+    # 注意：现在我们直接接收semester_id字符串，而不是Semester对象
+    
+    from django.core.management import call_command
+    call_command('import_scores',
+                file_path=file_path,
+                exam_id=exam_id,
+                exam_name=exam_name,
+                exam_type=exam_type,
+                semester=semester_id,  # 直接传递字符串ID
+                teacher_id=teacher_id,
+                region_id=region_id,
+                sheet=sheet_name,
+                create_students=create_students,
+                update_students=update_students,
+                skip_teacher=skip_teacher,
+                debug=debug,
+                smart_match=smart_match,
+                force=force,
+                task_id=task_id)
+
+def debug_form_data(request):
+    """表单调试视图"""
+    # 从会话中获取保存的表单数据(需要在提交处理时保存)
+    form_data = request.session.get('last_form_data', {})
+    return render(request, 'admin/debug_form.html', {'form_data': form_data})
+
+def debug_progress_file(request, task_id):
+    """直接显示进度文件内容"""
+    import json
+    import os
+    from django.conf import settings
+    from django.http import HttpResponse
+    
+    progress_file = os.path.join(settings.MEDIA_ROOT, 'progress', f"{task_id}.json")
+    
+    if os.path.exists(progress_file):
+        with open(progress_file, 'r') as f:
+            content = f.read()
+        return HttpResponse(f"<pre>{content}</pre>")
+    else:
+        return HttpResponse(f"进度文件不存在: {progress_file}")
+
+def test_task_launch(request):
+    """测试任务启动"""
+    task_id = str(uuid.uuid4())
+    
+    # 创建测试文件
+    test_file = os.path.join(settings.MEDIA_ROOT, 'test_data.txt')
+    with open(test_file, 'w') as f:
+        f.write("测试数据")
+    
+    # 启动简单测试任务
+    thread = threading.Thread(
+        target=run_import_task_async,
+        args=(test_file, "TEST-001", "测试考试", "TEST", "2022-2023-1", 
+              "T001", "6", "Sheet1", False, False, 
+              True, True, False, False, task_id)
+    )
+    thread.daemon = True
+    thread.start()
+    
+    return render(request, 'admin/test_task_launch.html', {
+        'task_id': task_id,
+        'title': '测试任务启动'
+    })

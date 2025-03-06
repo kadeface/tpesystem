@@ -116,7 +116,6 @@ class EducationEvaluationAdminSite(AdminSite):
         from . import views
         
         my_urls = [
-            # 添加教师升级URL
             path('promote-teachers/', views.promote_teachers_view, name='promote_teachers'),
             path('teacher-history/', views.teacher_history_view, name='teacher_history'),
             path('rebuild-teacher-history/', views.rebuild_teacher_history, name='rebuild_teacher_history'),
