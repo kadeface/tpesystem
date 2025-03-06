@@ -1,0 +1,54 @@
+# 忽略特定文件
+secrets.txt
+config.ini
+.env
+
+# 忽略特定类型的文件
+*.log
+*.tmp
+*.pyc
+
+# 忽略特定文件夹
+private/
+__pycache__/
+venv/
+
+# Python相关
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Django相关
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+
+# 私人配置文件
+.env
+.secret
+credentials.json
+
+# 数据文件
+*.xlsx
+*.csv
+import_errors.json 
