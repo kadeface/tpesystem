@@ -4,307 +4,250 @@
 {% block extrastyle %}
   {{ block.super }}
   <link rel="stylesheet" type="text/css" href="{% static 'admin/css/forms.css' %}">
-  <link rel="stylesheet" type="text/css" href="{% static 'admin/css/import-tools.css' %}">
-  <style>
-    /* 进度显示样式 */
+  <style type="text/css">
     .progress-container {
+      background-color: #fff;
+      border: 1px solid #ccc;
+      border-radius: 4px;
       margin: 20px 0;
       padding: 20px;
-      background-color: #f9f9f9;
-      border-radius: 5px;
       box-shadow: 0 1px 3px rgba(0,0,0,0.1);
     }
     
-    .progress-bar {
-      height: 25px;
-      background-color: #79aec8;
-      border-radius: 5px;
-      transition: width 0.5s ease;
-      text-align: center;
-      color: white;
-      line-height: 25px;
-    }
-    
-    .progress-details {
-      margin-top: 20px;
-      max-height: 400px;
-      overflow-y: auto;
-      background-color: #fff;
-      padding: 10px;
-      border: 1px solid #ddd;
-      border-radius: 3px;
-    }
-    
-    .progress-message {
-      margin-bottom: 10px;
+    .progress-title {
+      color: #417690;
+      font-size: 18px;
       font-weight: bold;
+      margin-bottom: 10px;
+      border-bottom: 1px solid #eee;
+      padding-bottom: 10px;
     }
     
-    .progress-log {
-      font-family: monospace;
-      font-size: 13px;
-      line-height: 1.5;
-      white-space: pre-wrap;
+    .progress-bar-outer {
+      width: 100%;
+      background-color: #f3f3f3;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      height: 20px;
+      margin: 15px 0;
     }
     
-    .progress-log-line {
-      border-bottom: 1px solid #f0f0f0;
-      padding: 3px 0;
-    }
-    
-    .progress-error {
-      color: #a94442;
-      background-color: #f2dede;
-      padding: 10px;
-      margin-top: 10px;
+    .progress-bar-inner {
+      background-color: #417690;
+      height: 100%;
       border-radius: 3px;
+      width: 0%;
+      transition: width 0.3s ease;
     }
     
-    .completed {
-      background-color: #5cb85c;
+    .status-info {
+      padding: 15px;
+      margin-bottom: 15px;
+      border-radius: 4px;
     }
     
-    .failed {
-      background-color: #d9534f;
+    .status-info.running {
+      background-color: #e8f4fd;
+      border: 1px solid #b8dcfd;
+    }
+    
+    .status-info.completed {
+      background-color: #e9f7ef;
+      border: 1px solid #b8e6c9;
+    }
+    
+    .status-info.error {
+      background-color: #f8d7da;
+      border: 1px solid #f5c6cb;
+    }
+    
+    .log-container {
+      max-height: 300px;
+      overflow-y: auto;
+      background-color: #f8f9fa;
+      border: 1px solid #eee;
+      border-radius: 4px;
+      padding: 10px;
+      font-family: monospace;
+      white-space: pre-wrap;
+      font-size: 12px;
+      margin-bottom: 20px;
+    }
+    
+    .action-buttons {
+      margin-top: 20px;
+    }
+    
+    .btn {
+      display: inline-block;
+      font-weight: 400;
+      text-align: center;
+      vertical-align: middle;
+      cursor: pointer;
+      padding: 6px 12px;
+      font-size: 14px;
+      line-height: 1.5;
+      border-radius: 4px;
+      text-decoration: none;
+      margin-right: 10px;
+    }
+    
+    .btn-primary {
+      color: #fff;
+      background-color: #417690;
+      border: 1px solid #417690;
+    }
+    
+    .btn-secondary {
+      color: #fff;
+      background-color: #6c757d;
+      border: 1px solid #6c757d;
+    }
+    
+    .btn:hover {
+      opacity: 0.9;
+    }
+    
+    .blink {
+      animation: blink-animation 1s steps(5, start) infinite;
+    }
+    
+    @keyframes blink-animation {
+      to {
+        visibility: hidden;
+      }
     }
   </style>
 {% endblock %}
 
-{% block js %}
-<script>
-  document.addEventListener('DOMContentLoaded', function() {
-    const taskId = '{{ task_id }}';
-    let intervalId;
-    let requestInProgress = false;
-    let isPageActive = true;  // 添加页面活动状态标志
-    
-    // 监听页面可见性变化
-    document.addEventListener('visibilitychange', function() {
-      isPageActive = !document.hidden;
-      
-      // 如果页面重新变为可见，立即更新进度
-      if (isPageActive) {
-        updateProgress();
-      }
-    });
-    
-    // 在页面即将卸载前清理
-    window.addEventListener('beforeunload', function() {
-      isPageActive = false;
-      if (intervalId) {
-        clearInterval(intervalId);
-      }
-    });
-    
-    function updateProgress() {
-      if (!isPageActive || requestInProgress) return;
-      
-      requestInProgress = true;
-      document.getElementById('current-time').textContent = new Date().toLocaleString();
-      document.getElementById('last-api-call').textContent = new Date().toLocaleString();
-      
-      // 添加信号控制器，允许中止请求
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000);  // 5秒超时
-      
-      // 添加时间戳避免缓存
-      const timestamp = new Date().getTime();
-      
-      // 统一使用正确的API端点 - 修复API路径
-      const url = `/api/import-progress/${taskId}/`;
-      
-      // 添加调试日志
-      console.log(`正在请求进度数据: ${url}`);
-      
-      fetch(url, {
-        headers: {
-          'X-Requested-With': 'XMLHttpRequest',
-          'Accept': 'application/json',
-        },
-        signal: controller.signal,  // 添加中止信号
-        credentials: 'same-origin'
-      })
-      .then(response => {
-        clearTimeout(timeoutId);
-        console.log(`API响应状态: ${response.status}`);
-        
-        if (!response.ok) {
-          throw new Error(`状态码: ${response.status}`);
-        }
-        return response.json();
-      })
-      .then(data => {
-        // 如果页面已不活跃，不处理响应
-        if (!isPageActive) return;
-        
-        console.log('收到进度数据:', data);
-        
-        // 更新进度条
-        const progressBar = document.getElementById('progress-bar');
-        progressBar.style.width = (data.percent || 0) + '%';
-        progressBar.textContent = (data.percent || 0) + '%';
-        
-        // 更新状态样式
-        if (data.status === 'COMPLETED') {
-          progressBar.classList.add('completed');
-          clearInterval(intervalId); // 停止轮询
-        } else if (data.status === 'FAILED') {
-          progressBar.classList.add('failed');
-          clearInterval(intervalId); // 停止轮询
-        }
-        
-        // 更新消息
-        document.getElementById('progress-message').textContent = data.message || '正在处理...';
-        
-        // 更新日志
-        const logContainer = document.getElementById('progress-log');
-        logContainer.innerHTML = '';
-        if (data.details && Array.isArray(data.details)) {
-          data.details.forEach(detail => {
-            const logLine = document.createElement('div');
-            logLine.className = 'progress-log-line';
-            logLine.textContent = detail;
-            logContainer.appendChild(logLine);
-          });
-          
-          // 滚动到日志底部
-          logContainer.scrollTop = logContainer.scrollHeight;
-        }
-        
-        // 显示错误（如果有）
-        const errorContainer = document.getElementById('progress-error');
-        if (data.errors && data.errors.length > 0) {
-          errorContainer.style.display = 'block';
-          errorContainer.innerHTML = '<h3>错误信息:</h3>';
-          data.errors.forEach(error => {
-            const errorLine = document.createElement('div');
-            errorLine.textContent = error;
-            errorContainer.appendChild(errorLine);
-          });
-        } else {
-          errorContainer.style.display = 'none';
-        }
-      })
-      .catch(error => {
-        clearTimeout(timeoutId);
-        // 如果是中止错误或页面已不活跃，不处理
-        if (error.name === 'AbortError' || !isPageActive) {
-          console.log('请求被中止或页面不活跃');
-          return;
-        }
-        
-        console.error('获取进度错误:', error);
-        console.error('错误类型:', error.name);
-        console.error('错误消息:', error.message);
-        console.error('堆栈:', error.stack);
-        
-        // 打印当前页面的会话ID和任务ID，帮助调试
-        console.error(`会话ID: ${document.getElementById('session-key').textContent}`);
-        console.error(`任务ID: ${taskId}`);
-        document.getElementById('progress-message').textContent = `获取进度失败: ${error.message}`;
-      })
-      .finally(() => {
-        requestInProgress = false;
-      });
-    }
-    
-    // 立即更新一次
-    updateProgress();
-    
-    // 每5秒更新一次，但仅在页面活跃时
-    intervalId = setInterval(() => {
-      if (isPageActive) {
-        updateProgress();
-      }
-    }, 5000);
-    
-    // 刷新按钮
-    document.getElementById('refresh-btn').addEventListener('click', updateProgress);
-  });
-</script>
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">首页</a>
+  &rsaquo; <a href="javascript:history.back();">数据导入</a>
+  &rsaquo; 导入进度
+</div>
 {% endblock %}
 
 {% block content %}
-<div class="progress-container">
-  <h1>导入任务进度</h1>
-  <p>任务ID: <span style="font-family: monospace;">{{ task_id }}</span></p>
-  
-  <!-- 添加调试信息 -->
-  <div id="debug-info" style="background: #f8f8f8; padding: 10px; margin-bottom: 15px; border: 1px solid #ddd;">
-    <p>当前时间: <span id="current-time"></span></p>
-    <p>页面加载时间: {{ now }}</p>
-    <p>上次API调用: <span id="last-api-call">尚未调用</span></p>
-    <p>会话ID: <span style="font-family: monospace;">{{ session_key }}</span></p>
-  </div>
-  
-  <div class="progress-message" id="progress-message">正在加载进度信息...</div>
-  
-  <div style="width: 100%; background-color: #e0e0e0; border-radius: 5px;">
-    <div id="progress-bar" class="progress-bar" style="width: 0%;">0%</div>
-  </div>
-  
-  <div class="progress-details">
-    <div class="progress-log" id="progress-log"></div>
-  </div>
-  
-  <div id="progress-error" class="progress-error" style="display: none;"></div>
-  
-  <div style="margin-top: 20px;">
-    <a href="{% url 'admin:index' %}" class="button">返回管理页面</a>
-    <button id="refresh-btn" class="button">刷新进度</button>
-  </div>
-  
-  <!-- 添加测试链接 -->
-  <div style="margin-top: 10px;">
-    <a href="/api/import-progress/{{task_id}}/" target="_blank">直接测试API</a> 
-    (统一的API路径)
-  </div>
-  
-  <!-- 添加文件备份测试链接 -->
-  <div style="margin-top: 5px;">
-    <a href="/media/progress/{{task_id}}.json" target="_blank">查看文件系统备份</a>
-  </div>
-  
-  <!-- 添加调试链接 -->
-  <div style="margin-top: 5px;">
-    <a href="/core/api/import-progress/?task_id={{task_id}}" target="_blank">原始API路径</a> 
-    (测试用)
-  </div>
-  
-  <!-- 添加手动触发按钮 -->
-  <div style="margin-top: 10px;">
-    <form action="/debug/trigger-task/" method="post">
-      {% csrf_token %}
-      <input type="hidden" name="task_id" value="{{ task_id }}">
-      <input type="hidden" name="session_key" value="{{ session_key }}">
-      <button type="submit">手动触发任务（调试用）</button>
-    </form>
-  </div>
-  
-  <!-- 添加在刷新按钮下方 -->
-  <div style="margin-top: 10px;">
-    <a href="/core/debug/progress-file/{{ task_id }}/" target="_blank" class="button">查看进度文件内容</a>
-  </div>
-  
-  <!-- 添加任务信息 -->
-  <div class="task-info">
-    <h3>导入任务信息</h3>
-    <p>任务ID: {{ task_id }}</p>
+<div id="content-main">
+  <div class="progress-container">
+    <h1 class="progress-title">数据导入进度</h1>
     
-    <!-- 如果有任务参数数据，显示它们 -->
-    {% if task_params %}
-    <div class="params">
-        <h4>导入参数:</h4>
-        <ul>
-            {% for key, value in task_params.items %}
-            <li><strong>{{ key }}:</strong> {{ value }}</li>
-            {% endfor %}
-        </ul>
+    <div id="status-info" class="status-info running">
+      <h3 id="status-message"><span class="blink">●</span> 正在处理...</h3>
+      <div>任务ID: <span id="task-id">{{ task_id }}</span></div>
+      <div>开始时间: <span id="start-time">{{ start_time|default:"加载中..." }}</span></div>
+      <div>已处理: <span id="processed-count">0</span> 条记录</div>
     </div>
-    {% endif %}
+    
+    <div>
+      <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+        <span>进度:</span>
+        <span id="progress-percentage">0%</span>
+      </div>
+      <div class="progress-bar-outer">
+        <div id="progress-bar" class="progress-bar-inner" style="width: 0%"></div>
+      </div>
+    </div>
+    
+    <h3>导入日志:</h3>
+    <div id="log-container" class="log-container">
+      正在连接到任务状态服务...
+    </div>
+    
+    <div class="action-buttons">
+      <a href="{{ admin_index_url|default:'/admin/' }}" class="btn btn-secondary">返回管理首页</a>
+      <a href="javascript:history.back();" class="btn btn-primary">返回上一页</a>
+    </div>
   </div>
 </div>
 
-<!-- 添加隐藏的会话ID标签 -->
-<div id="session-key" style="display:none;">{{ session_key }}</div>
+<script type="text/javascript">
+  document.addEventListener('DOMContentLoaded', function() {
+    const taskId = document.getElementById('task-id').textContent;
+    const statusInfo = document.getElementById('status-info');
+    const statusMessage = document.getElementById('status-message');
+    const progressBar = document.getElementById('progress-bar');
+    const progressPercent = document.getElementById('progress-percentage');
+    const logContainer = document.getElementById('log-container');
+    const startTimeElem = document.getElementById('start-time');
+    const processedCountElem = document.getElementById('processed-count');
+    
+    let isCompleted = false;
+    
+    // 轮询获取任务状态
+    function pollTaskStatus() {
+      if (isCompleted) return;
+      
+      fetch(`/api/task-status/?task_id=${taskId}`)
+        .then(response => response.json())
+        .then(data => {
+          // 更新进度条
+          const progress = data.progress || 0;
+          progressBar.style.width = `${progress}%`;
+          progressPercent.textContent = `${progress}%`;
+          
+          // 更新处理记录数
+          if (data.processed_count) {
+            processedCountElem.textContent = data.processed_count;
+          }
+          
+          // 更新开始时间
+          if (data.start_time) {
+            startTimeElem.textContent = data.start_time;
+          }
+          
+          // 更新日志
+          if (data.logs && data.logs.length > 0) {
+            logContainer.innerHTML = data.logs.join('<br>');
+            logContainer.scrollTop = logContainer.scrollHeight;
+          }
+          
+          // 更新状态
+          if (data.status === 'completed') {
+            isCompleted = true;
+            statusInfo.className = 'status-info completed';
+            statusMessage.innerHTML = '✓ 导入完成';
+            
+            const completionMsg = document.createElement('div');
+            completionMsg.className = 'status-info completed';
+            completionMsg.innerHTML = `<h3>✓ 导入成功</h3>
+              <p>处理完成 ${data.processed_count || 0} 条记录</p>
+              <p>耗时: ${data.elapsed_time || '未知'}</p>`;
+            
+            if (data.summary) {
+              completionMsg.innerHTML += `<div><strong>导入摘要:</strong><br>${data.summary}</div>`;
+            }
+            
+            statusInfo.parentNode.insertBefore(completionMsg, statusInfo.nextSibling);
+            statusInfo.style.display = 'none';
+          } else if (data.status === 'error') {
+            isCompleted = true;
+            statusInfo.className = 'status-info error';
+            statusMessage.innerHTML = '✗ 导入失败';
+            
+            const errorMsg = document.createElement('div');
+            errorMsg.className = 'status-info error';
+            errorMsg.innerHTML = `<h3>✗ 导入失败</h3>
+              <p>${data.error || '未知错误'}</p>`;
+            
+            statusInfo.parentNode.insertBefore(errorMsg, statusInfo.nextSibling);
+            statusInfo.style.display = 'none';
+          }
+        })
+        .catch(error => {
+          console.error('Error fetching task status:', error);
+          logContainer.innerHTML += '<br>获取任务状态时发生错误，将在5秒后重试...';
+        });
+      
+      // 继续轮询（除非已完成）
+      if (!isCompleted) {
+        setTimeout(pollTaskStatus, 2000);
+      }
+    }
+    
+    // 启动轮询
+    pollTaskStatus();
+  });
+</script>
 {% endblock %} 

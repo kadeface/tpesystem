@@ -8,8 +8,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # 开发环境使用文件缓存 - 修改为绝对路径
 CACHES = {
     'default': {
-        'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
-        'LOCATION': os.path.join(BASE_DIR, 'django_cache'),
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
     }
 }
 
@@ -31,6 +30,7 @@ INSTALLED_APPS = [
     'rest_framework',  # 添加 REST Framework
     'core',  # 添加 core 应用
     'django_filters',
+    'rest_api',  # 添加新的应用名称
     # ...
 ]
 

@@ -12,7 +12,7 @@ import os
 import re
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
-from core.models import Student, Subject, Exam, Score, School, Grade, Class, Teacher, Semester, TeacherSubject, Region, Family, StudentHistory
+from core.models import Student, Subject, Exam, Score, School, Grade, Class, Teacher, Semester, TeacherSubject, Region, Family, StudentHistory, TeacherHistory
 import uuid
 import hashlib
 # 导入所需模块
@@ -65,6 +65,12 @@ class Command(BaseCommand):
         parser.add_argument('--update_students', action='store_true', help='更新已存在的学生信息')
         parser.add_argument('--force', action='store_true', help='强制导入，不进行数据检查')
         parser.add_argument('--task_id', type=str, help='任务ID，用于进度跟踪')
+        parser.add_argument('--import_teacher_history', action='store_true', 
+                            help='同时导入教师历史记录')
+        parser.add_argument('--teacher_file', type=str, help='教师历史数据Excel文件路径')
+        parser.add_argument('--teacher_sheet', type=str, help='教师Excel工作表名称', default='Sheet1')
+        parser.add_argument('--auto_create_missing_teachers', action='store_true', 
+                            help='自动创建不存在的教师记录')
 
     def _extract_id_info(self, id_number):
         """
@@ -800,56 +806,11 @@ class Command(BaseCommand):
                 if col not in df.columns:
                     raise CommandError(f'缺少必要列: {col}')
             
-            # 定义全部可能的学科映射
-            ALL_SUBJECT_MAPPINGS = {
-                # 通用学科（各学段都有）
-                '语文': ('CHN', '语文'),
-                '数学': ('MATH', '数学'),
-                '英语': ('ENG', '英语'),
-                
-                # 小学学科
-                '科学': ('SCI', '科学'),
-                '品德': ('MOR_P', '品德与生活'),
-                '美术': ('ART_P', '美术'),
-                '音乐': ('MUS_P', '音乐'),
-                '体育': ('PE_P', '体育'),
-                
-                # 初中学科
-                '物理': ('PHY', '物理'),
-                '化学': ('CHEM', '化学'),
-                '生物': ('BIO', '生物'),
-                '地理': ('GEO', '地理'),
-                '历史': ('HIS', '历史'),
-                '道法': ('MOR', '道德与法治'),
-                '信息技术': ('IT_M', '信息技术'),
-                '体育与健康': ('PE_M', '体育与健康'),
-                
-                # 高中学科
-                '数学(文)': ('MATH_L', '数学(文科)'),
-                '数学(理)': ('MATH_S', '数学(理科)'),
-                '物理(选修)': ('PHY_E', '物理(选修)'),
-                '化学(选修)': ('CHEM_E', '化学(选修)'),
-                '生物(选修)': ('BIO_E', '生物(选修)'),
-                '政治(选修)': ('POL', '政治'),
-                '历史(选修)': ('HIS_E', '历史(选修)'),
-                '地理(选修)': ('GEO_E', '地理(选修)'),
-                '通用技术': ('TECH', '通用技术'),
-                
-                # 其他可能的学科名称变体
-                '思想政治': ('POL', '政治'),
-                '思政': ('POL', '政治'),
-                '品德与生活': ('MOR_P', '品德与生活'),
-                '品德与社会': ('MOR_P', '品德与社会'),
-                '道德与法治': ('MOR', '道德与法治'),
-                '自然': ('SCI', '科学'),
-                
-                # 总分和平均分
-                '总分': ('TOTAL', '总分'),
-                '平均分': ('AVG', '平均分')
-            }
+
             
             # 动态生成当前Excel表使用的学科映射
             subject_mapping = {}
+            subject_mapping=self._get_subject_mappings()
             for column in df.columns:
                 subject = self._match_subject(column)
                 if subject:
@@ -909,24 +870,17 @@ class Command(BaseCommand):
             except Exception as e:
                 self.stdout.write(self.style.ERROR(f"处理学期数据时出错: {str(e)}"))
                 raise e  # 重新抛出异常，让外层处理
-            
-            # 处理完成后输出优化的统计结果
-            #self._print_import_summary(import_stats)
-            
-            # 在处理过程中更新进度
-            # 例如，在处理学校前：
-            if self.tracker:
-                self.tracker.update(current=1, total=6, message='正在导入学校数据...')
-            
-            # 在处理年级前：
-            if self.tracker:
-                self.tracker.update(current=2, total=6, message='正在导入年级数据...')
-            
-            # 以此类推...
-            
-            # 完成时：
-            if self.tracker:
-                self.tracker.complete('导入成功完成！')
+             
+            # 如果启用了教师历史导入，则执行教师历史导入
+            if options.get('import_teacher_history'):
+                teacher_file = options.get('teacher_file')
+                if not teacher_file:
+                    self.stdout.write(self.style.WARNING('未提供教师数据文件，将尝试从成绩文件中提取教师信息'))
+                    # 从成绩数据中提取教师信息
+                    self._extract_and_import_teacher_history(df, semester_id, options)
+                else:
+                    # 从指定的教师文件导入
+                    self._import_teacher_history_from_file(teacher_file, semester_id, options)
             
         except Exception as e:
             raise CommandError(f'导入过程出错: {str(e)}')
@@ -940,8 +894,9 @@ class Command(BaseCommand):
         except Semester.DoesNotExist:
             raise CommandError(f"找不到学期: {semester_id}")
         
-        # 定义subject_mapping
+        # 定义subject_mapping - 使用通用方法
         subject_mapping = {}
+        ALL_SUBJECT_MAPPINGS = self._get_subject_mappings()
         for column in df.columns:
             subject = self._match_subject(column)
             if subject:
@@ -1430,53 +1385,8 @@ class Command(BaseCommand):
         Returns:
             Subject对象或None（如果没有匹配）
         """
-        # 定义全部可能的学科映射
-        ALL_SUBJECT_MAPPINGS = {
-            # 通用学科（各学段都有）
-            '语文': ('CHN', '语文'),
-            '数学': ('MATH', '数学'),
-            '英语': ('ENG', '英语'),
-            
-            # 小学学科
-            '科学': ('SCI', '科学'),
-            '品德': ('MOR_P', '品德与生活'),
-            '美术': ('ART_P', '美术'),
-            '音乐': ('MUS_P', '音乐'),
-            '体育': ('PE_P', '体育'),
-            
-            # 初中学科
-            '物理': ('PHY', '物理'),
-            '化学': ('CHEM', '化学'),
-            '生物': ('BIO', '生物'),
-            '地理': ('GEO', '地理'),
-            '历史': ('HIS', '历史'),
-            '道法': ('MOR', '道德与法治'),
-            '信息技术': ('IT_M', '信息技术'),
-            '体育与健康': ('PE_M', '体育与健康'),
-            
-            # 高中学科
-            '数学(文)': ('MATH_L', '数学(文科)'),
-            '数学(理)': ('MATH_S', '数学(理科)'),
-            '物理(选修)': ('PHY_E', '物理(选修)'),
-            '化学(选修)': ('CHEM_E', '化学(选修)'),
-            '生物(选修)': ('BIO_E', '生物(选修)'),
-            '政治(选修)': ('POL', '政治'),
-            '历史(选修)': ('HIS_E', '历史(选修)'),
-            '地理(选修)': ('GEO_E', '地理(选修)'),
-            '通用技术': ('TECH', '通用技术'),
-            
-            # 其他可能的学科名称变体
-            '思想政治': ('POL', '政治'),
-            '思政': ('POL', '政治'),
-            '品德与生活': ('MOR_P', '品德与生活'),
-            '品德与社会': ('MOR_P', '品德与社会'),
-            '道德与法治': ('MOR', '道德与法治'),
-            '自然': ('SCI', '科学'),
-            
-            # 总分和平均分
-            '总分': ('TOTAL', '总分'),
-            '平均分': ('AVG', '平均分')
-        }
+        # 获取映射
+        ALL_SUBJECT_MAPPINGS = self._get_subject_mappings()
         
         # 检查列名是否在映射中
         if column_name in ALL_SUBJECT_MAPPINGS:
@@ -1495,6 +1405,50 @@ class Command(BaseCommand):
             return subject
         
         return None
+
+    def _get_subject_id_map(self, debug=False):
+        """
+        获取学科名称到学科ID的映射。
+        
+        Args:
+            debug: 是否启用调试模式
+        
+        Returns:
+            dict: 学科名称到学科ID的映射
+        """
+        # 先打印所有学科供参考
+        self.stdout.write("数据库中的所有学科:")
+        subjects = Subject.objects.all()
+        subject_ids = []
+        for subject in subjects:
+            self.stdout.write(f"  {subject.subject_name} (ID: {subject.subject_id})")
+            subject_ids.append(subject.subject_id)
+        
+        # 使用通用映射
+        base_mappings = self._get_subject_mappings()
+        
+        # 转换为名称到ID的映射
+        subject_map = {k: v[0] for k, v in base_mappings.items()}
+        
+        # 移除映射到不存在学科ID的项
+        subject_map = {k: v for k, v in subject_map.items() if v in subject_ids}
+        
+        # 实际获取数据库中的学科
+        self.subject_name_map = {}  # 用于存储ID到名称的映射，便于反查
+        
+        for subject in subjects:
+            # 存储ID到名称的映射
+            self.subject_name_map[subject.subject_id] = subject.subject_name
+            
+            # 生成多种可能的键名以提高匹配率
+            key = subject.subject_name
+            subject_map[key] = subject.subject_id  # 完整名称
+            
+            # 特殊处理科任列名
+            key_with_suffix = f"{key}科任"
+            subject_map[key_with_suffix] = subject.subject_id
+        
+        return subject_map
 
     def _validate_import_data(self, df, debug=False):
         """
@@ -1602,4 +1556,570 @@ class Command(BaseCommand):
         # 如果有进度跟踪器，也更新进度消息
         if hasattr(self, 'tracker') and self.tracker:
             self.tracker.update(message=message) 
+
+    def _extract_and_import_teacher_history(self, df, semester_id, options):
+        """
+        从成绩数据中提取教师信息并导入历史记录。
+        
+        Args:
+            df: DataFrame对象，包含成绩数据
+            semester_id: 学期ID
+            options: 命令行选项字典
+        
+        Returns:
+            None
+        
+        Raises:
+            None
+        """
+        self.stdout.write("开始从成绩数据提取并导入教师历史记录...")
+        debug = options.get('debug', False)
+        
+        # 保存options以便在_process_teacher_row中使用
+        self.options = options
+        
+        # 获取学期对象
+        try:
+            semester = Semester.objects.get(semester_id=semester_id)
+        except Semester.DoesNotExist:
+            self.stdout.write(self.style.ERROR(f"学期不存在: {semester_id}"))
+            return
+        
+        # 尝试从成绩数据中提取可能的教师信息列
+        possible_teacher_columns = []
+        for col in df.columns:
+            # 尝试检测常见的教师相关列名
+            if any(keyword in col for keyword in ['教师', '老师', 'Teacher', '任课', '科任']):
+                possible_teacher_columns.append(col)
+        
+        if not possible_teacher_columns:
+            self.stdout.write(self.style.WARNING("未能从成绩数据中检测到教师相关列"))
+            return
+        
+        self.stdout.write(f"检测到可能的教师信息列: {', '.join(possible_teacher_columns)}")
+        
+        # 准备数据
+        # 1. 提取学校、年级、班级信息
+        unique_classes = df[['学校代码', '年级', '班别']].drop_duplicates()
+        if debug:
+            self.stdout.write(f"识别到 {len(unique_classes)} 个唯一班级")
+        
+        # 2. 获取学科映射
+        subject_map = self._get_subject_id_map(debug)
+        
+        # 3. 创建一个新的DataFrame用于存储教师信息
+        teacher_df = unique_classes.copy()
+        
+        # 4. 为每个可能的教师列添加到新DataFrame
+        for col in possible_teacher_columns:
+            # 尝试获取学科信息
+            subject_id = None
+            subject_name = col
+            
+            # 从列名中提取学科信息
+            for key, value in subject_map.items():
+                if key in col:
+                    subject_id = value
+                    subject_name = key
+                    break
+            
+            if subject_id:
+                # 合并教师信息
+                teacher_df[subject_name] = None
+                
+                # 对每个班级，找出对应的教师信息
+                for idx, class_row in teacher_df.iterrows():
+                    school_id = class_row['学校代码']
+                    grade_level = class_row['年级']
+                    class_name = class_row['班别']
+                    
+                    # 在原始df中查找匹配的行
+                    matching_rows = df[
+                        (df['学校代码'] == school_id) & 
+                        (df['年级'] == grade_level) & 
+                        (df['班别'] == class_name)
+                    ]
+                    
+                    if not matching_rows.empty and col in matching_rows.columns:
+                        # 获取该班级该学科的教师信息
+                        teacher_values = matching_rows[col].dropna().unique()
+                        if len(teacher_values) > 0:
+                            # 使用第一个非空值作为教师名称
+                            teacher_df.at[idx, subject_name] = str(teacher_values[0]).strip()
+        
+        # 5. 设置列名映射，以便_process_teacher_row可以使用
+        self.column_map = {
+            '学校代码': '学校代码',
+            '年级': '年级',
+            '班别': '班别'
+        }
+        
+        # 6. 确定学科列
+        identified_columns = list(self.column_map.values())
+        subject_columns = [col for col in teacher_df.columns if col not in identified_columns]
+        
+        # 7. 处理每一行数据
+        created_count = updated_count = error_count = 0
+        for _, row in teacher_df.iterrows():
+            c, u, e = self._process_teacher_row(
+                row, 
+                subject_columns, 
+                subject_map, 
+                semester, 
+                debug, 
+                options.get('update', False)
+            )
+            created_count += c
+            updated_count += u
+            error_count += e
+        
+        # 输出结果
+        self.stdout.write(self.style.SUCCESS(
+            f"从成绩数据提取并导入教师历史记录完成: 新建 {created_count}, 更新 {updated_count}, 错误 {error_count}"
+        ))
+
+    def _import_teacher_history_from_file(self, file_path, semester_id, options):
+        """从指定文件导入教师历史记录"""
+        self.stdout.write(f"开始从文件 {file_path} 导入教师历史记录...")
+        
+        # 复用 import_teacher_history.py 中的逻辑
+        debug = options.get('debug', False)
+        update = options.get('update', False)
+        
+        try:
+            # 读取Excel文件
+            df = pd.read_excel(file_path, sheet_name=options.get('teacher_sheet', 'Sheet1'))
+            self.stdout.write(f'成功读取教师文件，共 {len(df)} 条记录')
+            
+            # 获取学科映射
+            subject_map = self._get_subject_id_map(debug)
+            
+            # 验证数据
+            valid, subject_columns = self._validate_teacher_data(df)
+            
+            # 获取学期对象
+            semester = Semester.objects.get(semester_id=semester_id)
+            
+            # 处理每行数据
+            created_count = updated_count = error_count = 0
+            for _, row in df.iterrows():
+                c, u, e = self._process_teacher_row(row, subject_columns, subject_map, 
+                                                   semester, debug, update)
+                created_count += c
+                updated_count += u
+                error_count += e
+            
+            # 输出结果
+            self.stdout.write(self.style.SUCCESS(
+                f"教师历史导入完成: 新建 {created_count}, 更新 {updated_count}, 错误 {error_count}"
+            ))
+            
+        except Exception as e:
+            self.stdout.write(self.style.ERROR(f"导入教师历史记录失败: {str(e)}"))
+
+
+    def _get_subject_mappings(self):
+        """
+        获取所有可能的学科映射关系。
+        
+        Args:
+            无
+            
+        Returns:
+            dict: 学科名称到(学科ID, 学科名)元组的映射
+        """
+        # 定义全部可能的学科映射
+        return {
+            # 通用学科（各学段都有）
+            '语文': ('CHN', '语文'),
+            '数学': ('MATH', '数学'),
+            '英语': ('ENG', '英语'),
+            
+            # 小学学科
+            '科学': ('SCI', '科学'),
+            '品德': ('MOR_P', '品德与生活'),
+            '美术': ('ART_P', '美术'),
+            '音乐': ('MUS_P', '音乐'),
+            '体育': ('PE_P', '体育'),
+            
+            # 初中学科
+            '物理': ('PHY', '物理'),
+            '化学': ('CHEM', '化学'),
+            '生物': ('BIO', '生物'),
+            '地理': ('GEO', '地理'),
+            '历史': ('HIS', '历史'),
+            '道法': ('MOR', '道德与法治'),
+            '信息技术': ('IT_M', '信息技术'),
+            '体育与健康': ('PE_M', '体育与健康'),
+            
+            # 高中学科
+            '数学(文)': ('MATH_L', '数学(文科)'),
+            '数学(理)': ('MATH_S', '数学(理科)'),
+            '物理(选修)': ('PHY_E', '物理(选修)'),
+            '化学(选修)': ('CHEM_E', '化学(选修)'),
+            '生物(选修)': ('BIO_E', '生物(选修)'),
+            '政治(选修)': ('POL', '政治'),
+            '历史(选修)': ('HIS_E', '历史(选修)'),
+            '地理(选修)': ('GEO_E', '地理(选修)'),
+            '通用技术': ('TECH', '通用技术'),
+            
+            # 其他可能的学科名称变体
+            '思想政治': ('POL', '政治'),
+            '思政': ('POL', '政治'),
+            '品德与生活': ('MOR_P', '品德与生活'),
+            '品德与社会': ('MOR_P', '品德与社会'),
+            '道德与法治': ('MOR', '道德与法治'),
+            '自然': ('SCI', '科学'),
+            
+            # 总分和平均分
+            '总分': ('TOTAL', '总分'),
+            '平均分': ('AVG', '平均分')
+        }
+
+    def _validate_teacher_data(self, df):
+        """
+        验证教师导入数据的有效性。
+        
+        Args:
+            df: DataFrame对象，包含要验证的数据
+            
+        Returns:
+            tuple: (是否有效, 学科列列表)
+            
+        Raises:
+            CommandError: 当数据无效时抛出
+        """
+        # 打印所有列名，帮助调试
+        self.stdout.write("Excel文件中的列名:")
+        for col_idx, col_name in enumerate(df.columns):
+            self.stdout.write(f"  {col_idx+1}. '{col_name}'")
+        
+        # 列名映射 - 支持多种可能的列名
+        column_mappings = {
+            '学校代码': ['学校代码', '学校编号', '校码'],
+            '年级': ['年级', '级别', 'Grade'],
+            '班别': ['班别', '班级', '班号', '班组', 'Class']
+        }
+        
+        # 初始化列名映射结果
+        actual_column_names = {}
+        missing_columns = []
+        
+        # 检查每个所需列，寻找匹配
+        for required_col, possible_names in column_mappings.items():
+            found = False
+            for name in possible_names:
+                if name in df.columns:
+                    actual_column_names[required_col] = name
+                    found = True
+                    break
+            
+            if not found:
+                missing_columns.append(required_col)
+        
+        # 如果有缺失列，抛出错误
+        if missing_columns:
+            error_msg = f"缺少必要列: {', '.join(missing_columns)}\n可能的列名: {column_mappings}"
+            raise CommandError(error_msg)
+        
+        # 确定学科列 - 排除已识别的列和学校名称列
+        identified_columns = list(actual_column_names.values()) + ['学校名称']
+        subject_columns = [col for col in df.columns if col not in identified_columns]
+        
+        if not subject_columns:
+            raise CommandError('未找到学科教师列')
+        
+        # 将实际列名保存到类属性中，供process_row使用
+        self.column_map = actual_column_names
+        
+        return True, subject_columns
+
+    def _process_teacher_row(self, row, subject_columns, subject_map, semester, debug=False, update_existing=False):
+        """
+        处理单行教师数据，为每个学科教师创建历史记录。
+        
+        Args:
+            row: Series对象，包含一行数据
+            subject_columns: 学科教师列名列表
+            subject_map: 学科名称到学科ID的映射
+            semester: 学期对象
+            debug: 是否启用调试模式
+            update_existing: 是否更新现有记录
+            
+        Returns:
+            tuple: (创建数, 更新数, 错误数)
+        
+        Raises:
+            None
+        """
+        created_count = 0
+        updated_count = 0
+        error_count = 0
+        
+        try:
+            # 使用validate_data中识别的列名获取基本数据
+            school_id = str(row[self.column_map['学校代码']]).strip()
+            grade_level = str(row[self.column_map['年级']]).strip()
+            class_name = str(row[self.column_map['班别']]).strip()
+            
+            # 输出调试信息
+            if debug:
+                self.stdout.write(f"处理行: 学校={school_id}, 年级={grade_level}, 班级={class_name}")
+            
+            # 查找学校
+            try:
+                school = School.objects.get(school_id=school_id)
+            except School.DoesNotExist:
+                if debug:
+                    self.stdout.write(self.style.ERROR(f"学校不存在: {school_id}"))
+                return 0, 0, 1
+            
+            # 生成与导入分数时相同格式的班级ID和年级ID
+            semester_id = semester.semester_id
+            semester_short = semester_id.replace("-", "")[-3:]  # 例如 "2022-2023-1" 变为 "231"
+            
+            # 按照import_scores.py的格式构造ID
+            grade_id = f"G{school_id[:3]}_{grade_level}_{semester_short}"
+            class_id = f"C{school_id[:2]}_{grade_level}{class_name}_{semester_short}"
+            
+            # 还保留旧格式ID以增加匹配可能性
+            old_class_id = f"{school_id}_{grade_level}_{class_name}"
+            
+            # 查找班级 - 多种匹配方式
+            class_obj = None
+            grade = None
+            
+            # 1. 先尝试使用新格式ID查找
+            try:
+                class_obj = Class.objects.get(class_id=class_id)
+                grade = class_obj.grade
+                if debug:
+                    self.stdout.write(f"通过新格式班级ID找到班级: {class_id}")
+            except Class.DoesNotExist:
+                # 2. 尝试使用旧格式ID查找
+                try:
+                    class_obj = Class.objects.get(class_id=old_class_id)
+                    grade = class_obj.grade
+                    if debug:
+                        self.stdout.write(f"通过旧格式班级ID找到班级: {old_class_id}")
+                except Class.DoesNotExist:
+                    # 3. 尝试从学校和班级名称查找
+                    class_obj = Class.objects.filter(
+                        grade__school__school_id=school_id,
+                        class_name=class_name
+                    ).first()
+                    
+                    if class_obj:
+                        grade = class_obj.grade
+                        if debug:
+                            self.stdout.write(f"通过学校和班级名称找到班级: {class_obj.class_id}")
+                    else:
+                        # 4. 通过学生历史记录查找班级
+                        student_history = StudentHistory.objects.filter(
+                            school__school_id=school_id,
+                            semester=semester,
+                            grade__grade_name=grade_level
+                        ).first()
+                        
+                        if student_history and student_history.class_field:
+                            class_obj = student_history.class_field
+                            grade = student_history.grade
+                            if debug:
+                                self.stdout.write(f"通过学生历史记录找到班级: {class_obj.class_id}")
+                        else:
+                            # 5. 尝试查找年级以便创建班级
+                            try:
+                                # 先用新格式ID查找年级
+                                grade_obj = Grade.objects.get(grade_id=grade_id)
+                            except Grade.DoesNotExist:
+                                # 再尝试通过学校和年级名称查找
+                                grade_obj = Grade.objects.filter(
+                                    school__school_id=school_id,
+                                    grade_name=f"{grade_level}年级"
+                                ).first()
+                            
+                            if grade_obj:
+                                if debug:
+                                    self.stdout.write(f"找到年级但未找到班级: {grade_level}")
+                                if hasattr(self, 'options') and self.options.get('auto_create_missing_teachers'):
+                                    # 创建新班级，使用与导入分数相同的ID格式
+                                    class_obj = Class.objects.create(
+                                        class_id=class_id,
+                                        class_name=f"{grade_level}年级{class_name}班",
+                                        grade=grade_obj,
+                                        status='ACTIVE'
+                                    )
+                                    grade = grade_obj
+                                    if debug:
+                                        self.stdout.write(self.style.SUCCESS(f"自动创建班级: {class_id}"))
+                                else:
+                                    if debug:
+                                        self.stdout.write(self.style.ERROR(f"找不到班级且未启用自动创建: {class_name}"))
+                                    return 0, 0, 1
+                            else:
+                                if debug:
+                                    self.stdout.write(self.style.ERROR(f"找不到年级: {grade_level} (学校: {school_id})"))
+                                return 0, 0, 1
+
+            if not class_obj:
+                if debug:
+                    self.stdout.write(self.style.ERROR(f"无法找到班级: {class_name} (年级: {grade_level}, 学校: {school_id})"))
+                return 0, 0, 1
+            
+            # 处理每个学科教师
+            for subject_col in subject_columns:
+                if pd.isna(row[subject_col]):
+                    continue
+                
+                teacher_name = str(row[subject_col]).strip()
+                if not teacher_name:
+                    continue
+                
+                if debug:
+                    self.stdout.write(f"处理学科: {subject_col}, 教师: {teacher_name}")
+                
+                # 获取学科ID
+                subject_id = None
+                
+                # 1. 直接从映射中查找完整的列名
+                if subject_col in subject_map:
+                    subject_id = subject_map[subject_col]
+                else:
+                    # 2. 尝试从映射中查找部分匹配
+                    for key, value in subject_map.items():
+                        if key in subject_col or subject_col in key:
+                            subject_id = value
+                            break
+                
+                if not subject_id:
+                    if debug:
+                        self.stdout.write(self.style.ERROR(f"无法识别学科: {subject_col}"))
+                    error_count += 1
+                    continue
+                
+                # 查找学科
+                try:
+                    subject = Subject.objects.get(subject_id=subject_id)
+                except Subject.DoesNotExist:
+                    if debug:
+                        self.stdout.write(self.style.ERROR(f"学科不存在: {subject_id}"))
+                    error_count += 1
+                    continue
+                
+                # 根据教师姓名查找教师记录 - 更灵活的匹配方式
+                try:
+                    # 1. 精确匹配当前学校教师
+                    teacher = Teacher.objects.filter(
+                        name=teacher_name,
+                        current_school__school_id=school_id
+                    ).first()
+                    
+                    # 2. 如果未找到，尝试在所有教师中查找
+                    if not teacher:
+                        teacher = Teacher.objects.filter(name=teacher_name).first()
+                    
+                    # 3. 如果仍未找到，尝试模糊匹配
+                    if not teacher and len(teacher_name) > 1:
+                        if debug:
+                            self.stdout.write(f"尝试模糊匹配教师: {teacher_name}")
+                        # 使用包含查询
+                        possible_teachers = Teacher.objects.filter(
+                            name__contains=teacher_name[:2],
+                            current_school__school_id=school_id
+                        )
+                        if possible_teachers.exists():
+                            if debug:
+                                self.stdout.write(f"找到可能匹配的教师: {[t.name for t in possible_teachers]}")
+                            teacher = possible_teachers.first()
+                    
+                    # 4. 如果启用了自动创建教师选项，创建不存在的教师
+                    if not teacher and hasattr(self, 'options') and self.options.get('auto_create_missing_teachers'):
+                        # 创建新教师
+                        import uuid
+                        teacher_id = f"T{uuid.uuid4().hex[:8]}"  # 生成唯一ID
+                        teacher = Teacher.objects.create(
+                            teacher_id=teacher_id,
+                            name=teacher_name,
+                            gender='U',  # 默认性别为未知
+                            current_school=school,
+                            status='ACTIVE'
+                        )
+                        if debug:
+                            self.stdout.write(self.style.SUCCESS(f"自动创建教师: {teacher_name} (ID: {teacher_id})"))
+                    
+                    if not teacher:
+                        if debug:
+                            self.stdout.write(self.style.ERROR(f"教师不存在: {teacher_name} (在学校 {school_id})"))
+                        error_count += 1
+                        continue
+                        
+                except Exception as e:
+                    if debug:
+                        self.stdout.write(self.style.ERROR(f"查找教师错误: {str(e)}"))
+                    error_count += 1
+                    continue
+                
+                # 判断教师是否班主任（通常一个班级只有一个班主任）
+                is_class_teacher = False
+                admin_position = ''
+                
+                # 判断班主任
+                if "班主任" in subject_col or subject_col == "班主任":
+                    is_class_teacher = True
+                    admin_position = '班主任'
+                
+                # 创建或更新TeacherHistory记录
+                try:
+                    # 检查是否已存在相同记录
+                    exists = TeacherHistory.objects.filter(
+                        teacher=teacher,
+                        school=school,
+                        semester=semester,
+                        subject=subject,
+                        class_field=class_obj
+                    ).exists()
+                    
+                    if exists and not update_existing:
+                        # 如果记录已存在且不更新，跳过
+                        if debug:
+                            self.stdout.write(f"跳过已存在的记录: {teacher.name} - {subject.subject_name} - {class_obj.class_name}")
+                        continue
+                    
+                    # 创建或更新历史记录
+                    history, created = TeacherHistory.objects.update_or_create(
+                        teacher=teacher,
+                        school=school,
+                        semester=semester,
+                        subject=subject,
+                        class_field=class_obj,
+                        defaults={
+                            'grade': grade,
+                            'is_class_teacher': is_class_teacher,
+                            'admin_position': admin_position,
+                            'start_date': semester.start_date,
+                            'end_date': semester.end_date,
+                            'status': 'COMPLETED'
+                        }
+                    )
+                    
+                    if created:
+                        created_count += 1
+                        if debug:
+                            self.stdout.write(self.style.SUCCESS(f"创建教师历史记录: {teacher.name} - {subject.subject_name} - {class_obj.class_name}"))
+                    else:
+                        updated_count += 1
+                        if debug:
+                            self.stdout.write(f"更新教师历史记录: {teacher.name} - {subject.subject_name} - {class_obj.class_name}")
+                        
+                except Exception as e:
+                    if debug:
+                        self.stdout.write(self.style.ERROR(f"创建历史记录错误: {str(e)}"))
+                    error_count += 1
+                    
+        except Exception as e:
+            if debug:
+                self.stdout.write(self.style.ERROR(f"处理行数据错误: {str(e)}"))
+            error_count += 1
+            
+        return created_count, updated_count, error_count
 

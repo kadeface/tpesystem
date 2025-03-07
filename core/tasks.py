@@ -169,9 +169,11 @@ class ProgressTracker:
         with open(progress_file, 'w', encoding='utf-8') as f:
             json.dump(progress_data, f, ensure_ascii=False)
 
-def run_import_task_async(file_path, exam_id, exam_name, exam_type, semester, 
-                          teacher_id, region, sheet_name, create_students, 
-                          update_students, skip_teacher, debug, smart_match, force, task_id):
+def run_import_task_async(file_path, exam_id, exam_name, exam_type, semester_id, 
+                         teacher_id, region_id, sheet_name, create_students, 
+                         update_students, skip_teacher, debug, smart_match, force, task_id,
+                         import_teacher_history=False, teacher_file=None, 
+                         teacher_sheet='Sheet1', auto_create_missing_teachers=False):
     """
     异步运行导入任务。
     
@@ -180,9 +182,9 @@ def run_import_task_async(file_path, exam_id, exam_name, exam_type, semester,
         exam_id: 考试ID
         exam_name: 考试名称
         exam_type: 考试类型
-        semester: 学期
+        semester_id: 学期ID
         teacher_id: 教师ID
-        region: 区域
+        region_id: 区域ID
         sheet_name: 工作表名称
         create_students: 是否创建学生
         update_students: 是否更新学生
@@ -191,6 +193,10 @@ def run_import_task_async(file_path, exam_id, exam_name, exam_type, semester,
         smart_match: 是否智能匹配
         force: 是否强制导入
         task_id: 任务ID
+        import_teacher_history: 是否导入教师历史记录
+        teacher_file: 教师历史数据文件路径
+        teacher_sheet: 教师历史数据工作表名称
+        auto_create_missing_teachers: 是否自动创建不存在的教师
     
     Returns:
         任务执行结果字典
@@ -217,6 +223,38 @@ def run_import_task_async(file_path, exam_id, exam_name, exam_type, semester,
         logger.info(f"任务参数: 文件={file_path}, 考试ID={exam_id}, 考试名称={exam_name}")
         tracker.update(message=f"任务参数: 文件={file_path}, 考试ID={exam_id}")
         
+        # 构建完整的命令参数
+        cmd_args = {
+            'file_path': file_path,
+            'exam_id': exam_id,
+            'exam_name': exam_name,
+            'exam_type': exam_type,
+            'semester': semester_id,
+            'teacher_id': teacher_id,
+            'region_id': region_id,
+            'sheet': sheet_name,
+            'create_students': create_students,
+            'update_students': update_students,
+            'skip_teacher': skip_teacher,
+            'debug': debug,
+            'smart_match': smart_match,
+            'force': force,
+            'task_id': task_id
+        }
+        
+        # 添加教师历史导入相关参数
+        if import_teacher_history:
+            cmd_args['import_teacher_history'] = True
+            
+            if teacher_file:
+                cmd_args['teacher_file'] = teacher_file
+                
+            if teacher_sheet:
+                cmd_args['teacher_sheet'] = teacher_sheet
+                
+            if auto_create_missing_teachers:
+                cmd_args['auto_create_missing_teachers'] = True
+        
         # 构建命令参数
         manage_py = os.path.join(settings.BASE_DIR, 'manage.py')
         
@@ -228,15 +266,15 @@ def run_import_task_async(file_path, exam_id, exam_name, exam_type, semester,
             '--exam_id', exam_id,
             '--exam_name', exam_name,
             '--exam_type', exam_type,
-            '--semester', semester,
+            '--semester', semester_id,
             '--task_id', task_id  # 传递任务ID给命令
         ]
         
         # 添加可选参数
         if teacher_id:
             args.extend(['--teacher_id', teacher_id])
-        if region:
-            args.extend(['--region_id', region])
+        if region_id:
+            args.extend(['--region_id', region_id])
         if sheet_name:
             args.extend(['--sheet', sheet_name])
         if create_students:
@@ -534,4 +572,6 @@ def get_task_info_from_storage(task_id):
     
     # 临时实现，仅用于示例
     raise Exception("尚未实现任务存储机制")
+
+
 

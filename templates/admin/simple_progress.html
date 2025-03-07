@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>简单进度测试</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .progress-bar { 
+            height: 20px;
+            background-color: #4CAF50;
+            width: 0%;
+            transition: width 0.5s;
+        }
+        #log { 
+            height: 200px; 
+            border: 1px solid #ccc; 
+            overflow-y: auto;
+            margin-top: 20px;
+            padding: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>简单进度测试</h1>
+    
+    <div style="margin: 20px 0;">
+        <div style="width: 100%; background-color: #ddd;">
+            <div id="progress-bar" class="progress-bar">0%</div>
+        </div>
+    </div>
+    
+    <button id="start-btn">开始测试</button>
+    <button id="check-btn">检查进度</button>
+    
+    <div id="log"></div>
+    
+    <script>
+        document.getElementById('start-btn').addEventListener('click', function() {
+            // 添加日志
+            addLog('开始测试...');
+            
+            // 发起AJAX请求启动测试
+            fetch('/start-simple-test/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCookie('csrftoken')
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                addLog('测试已启动: ' + JSON.stringify(data));
+                // 自动开始检查进度
+                checkProgress();
+            })
+            .catch(error => {
+                addLog('错误: ' + error);
+            });
+        });
+        
+        document.getElementById('check-btn').addEventListener('click', checkProgress);
+        
+        function checkProgress() {
+            addLog('检查进度...');
+            
+            // AJAX请求检查进度
+            $.get('/core/api/import-progress/' + taskId + '/')
+                .done(function(data) {
+                    if(data.status === 'completed') {
+                        // 导入完成，跳转到结果页面
+                        window.location = '/core/imports/results/?task_id=' + taskId;
+                    } else {
+                        // 更新进度显示
+                        updateProgressDisplay(data);
+                        // 继续轮询
+                        setTimeout(checkProgress, 2000);
+                    }
+                });
+        }
+        
+        function addLog(message) {
+            const log = document.getElementById('log');
+            const line = document.createElement('div');
+            line.textContent = new Date().toLocaleTimeString() + ': ' + message;
+            log.appendChild(line);
+            log.scrollTop = log.scrollHeight;
+        }
+        
+        // 获取CSRF令牌的函数
+        function getCookie(name) {
+            let cookieValue = null;
+            if (document.cookie && document.cookie !== '') {
+                const cookies = document.cookie.split(';');
+                for (let i = 0; i < cookies.length; i++) {
+                    const cookie = cookies[i].trim();
+                    if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                        cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                        break;
+                    }
+                }
+            }
+            return cookieValue;
+        }
+        
+        // 页面加载后开始轮询
+        $(document).ready(function() {
+            checkProgress();
+        });
+    </script>
+</body>
+</html> 

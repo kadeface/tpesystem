@@ -124,7 +124,7 @@
         <div style="min-height: 60px; margin-bottom: 15px; color: #555; line-height: 1.5;">
           <p>导入学生考试成绩数据，同时支持导入学校、年级、班级和学生基本信息。</p>
         </div>
-        <a href="{% url 'import-scores' %}" style="display: inline-block; background: #79aec8; padding: 10px 15px; border: none; border-radius: 4px; color: #fff; cursor: pointer; text-decoration: none; font-weight: 500; font-size: 14px; text-align: center;">开始导入成绩数据</a>
+        <a href="{% url 'admin:scores_import' %}" style="display: inline-block; background: #79aec8; padding: 10px 15px; border: none; border-radius: 4px; color: #fff; cursor: pointer; text-decoration: none; font-weight: 500; font-size: 14px; text-align: center;">开始导入成绩数据</a>
       </div>
     </div>
     
@@ -136,22 +136,10 @@
         <div style="min-height: 60px; margin-bottom: 15px; color: #555; line-height: 1.5;">
           <p>导入教师-学科-班级关联数据，建立教师、学科、班级三者的关联关系。</p>
         </div>
-        <a href="{% url 'import-teacher-subjects' %}" style="display: inline-block; background: #79aec8; padding: 10px 15px; border: none; border-radius: 4px; color: #fff; cursor: pointer; text-decoration: none; font-weight: 500; font-size: 14px; text-align: center;">开始导入关联数据</a>
+        <a href="{% url 'admin:teacher_import' %}" style="display: inline-block; background: #79aec8; padding: 10px 15px; border: none; border-radius: 4px; color: #fff; cursor: pointer; text-decoration: none; font-weight: 500; font-size: 14px; text-align: center;">开始导入关联数据</a>
       </div>
     </div>
   </div>
 
-  <!-- 在适当位置添加教师升级卡片 -->
-  <div class="card mb-4">
-    <div class="card-header bg-primary text-white">
-      <h5 class="mb-0">教师升级</h5>
-    </div>
-    <div class="card-body">
-      <p>将教师从上一学期升级到新学期，自动创建历史记录和新的任课关系。</p>
-      <a href="/admin/promote-teachers/" class="btn btn-outline-primary">
-        <i class="fas fa-graduation-cap"></i> 教师学期升级
-      </a>
-    </div>
-  </div>
-</div>
+
 {% endblock %} 

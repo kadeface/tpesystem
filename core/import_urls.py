@@ -2,10 +2,14 @@ from django.urls import path
 from .admin_imports import ImportDataAdmin
 from . import views
 
+app_name = 'core_imports'
+
 urlpatterns = [
-    path('', ImportDataAdmin.get_import_data_view, name='import-data'),
-    path('scores/', ImportDataAdmin.get_import_scores_view, name='import-scores'),
-    path('teacher-subjects/', ImportDataAdmin.get_import_teacher_subjects_view, name='import-teacher-subjects'),
+ 
+    path('data-import/', ImportDataAdmin.data_import_view, name='data_import'),
+    path('scores-import/', ImportDataAdmin.scores_import_view, name='scores_import'),
+    path('teacher-import/', ImportDataAdmin.teacher_import_view, name='teacher_import'),
+ 
     path('teacher-history/', views.teacher_history_view, name='teacher_history'),
     path('rebuild-teacher-history/', views.rebuild_teacher_history, name='rebuild_teacher_history'),
     path('teacher-history-summary/', views.teacher_history_summary, name='teacher_history_summary'),

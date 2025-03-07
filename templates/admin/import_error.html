@@ -1,0 +1,123 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" type="text/css" href="{% static 'admin/css/forms.css' %}">
+  <style type="text/css">
+    .error-container {
+      background-color: #fff;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      margin: 20px 0;
+      padding: 20px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    
+    .error-title {
+      color: #c53f3f;
+      font-size: 18px;
+      font-weight: bold;
+      margin-bottom: 10px;
+      border-bottom: 1px solid #eee;
+      padding-bottom: 10px;
+    }
+    
+    .error-message {
+      background-color: #f8d7da;
+      border: 1px solid #f5c6cb;
+      border-radius: 4px;
+      color: #721c24;
+      padding: 15px;
+      margin-bottom: 20px;
+    }
+    
+    .error-details {
+      background-color: #f8f9fa;
+      border: 1px solid #eee;
+      border-radius: 4px;
+      padding: 15px;
+      margin-bottom: 20px;
+      font-family: monospace;
+      white-space: pre-wrap;
+      overflow-x: auto;
+    }
+    
+    .action-buttons {
+      margin-top: 20px;
+    }
+    
+    .btn {
+      display: inline-block;
+      font-weight: 400;
+      text-align: center;
+      vertical-align: middle;
+      cursor: pointer;
+      padding: 6px 12px;
+      font-size: 14px;
+      line-height: 1.5;
+      border-radius: 4px;
+      text-decoration: none;
+      margin-right: 10px;
+    }
+    
+    .btn-secondary {
+      color: #fff;
+      background-color: #6c757d;
+      border: 1px solid #6c757d;
+    }
+    
+    .btn-primary {
+      color: #fff;
+      background-color: #417690;
+      border: 1px solid #417690;
+    }
+    
+    .btn:hover {
+      opacity: 0.9;
+    }
+  </style>
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{{ admin_index_url }}">首页</a>
+  &rsaquo; <a href="javascript:history.back();">数据导入</a>
+  &rsaquo; 导入错误
+</div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+  <div class="error-container">
+    <h1 class="error-title">导入过程中出现错误</h1>
+    
+    <div class="error-message">
+      {{ error }}
+    </div>
+    
+    {% if error_details %}
+    <h2>详细错误信息</h2>
+    <div class="error-details">
+      {{ error_details }}
+    </div>
+    {% endif %}
+    
+    <div class="action-buttons">
+      <a href="javascript:history.back();" class="btn btn-secondary">返回上一页</a>
+      <a href="{{ admin_index_url }}" class="btn btn-primary">返回管理首页</a>
+    </div>
+    
+    <div style="margin-top: 20px;">
+      <h3>故障排除建议</h3>
+      <ul>
+        <li>检查上传的文件格式是否正确（应为Excel文件）</li>
+        <li>确认Excel工作表名称是否与表单中指定的一致</li>
+        <li>验证文件中的数据结构是否符合系统要求</li>
+        <li>检查文件是否包含所有必需的列和数据</li>
+        <li>尝试重新上传或使用其他文件</li>
+      </ul>
+    </div>
+  </div>
+</div>
+{% endblock %} 
