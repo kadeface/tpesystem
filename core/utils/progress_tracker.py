@@ -17,10 +17,10 @@ class ProgressTracker:
         进度跟踪器实例
     """
     
-    def __init__(self, task_id=None, timeout=3600):
+    def __init__(self, task_id, total_steps=6, timeout=3600):
         self.task_id = task_id or str(uuid.uuid4())
         self.timeout = timeout
-        self.total_steps = 100  # 设置默认总步骤数
+        self.total_steps = total_steps
         self.current_step = 0
         self.status = 'PENDING'
         self.message = '准备开始导入...'

@@ -1,0 +1,36 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block content %}
+<div style="padding: 20px;">
+    <h2>静态任务状态查看</h2>
+    <p>任务ID: {{ task_id }}</p>
+    
+    <div style="margin: 10px 0; padding: 10px; background: #f0f0f0; border: 1px solid #ccc;">
+        此页面不会自动发送API请求。请使用下方按钮手动查看进度文件。
+    </div>
+    
+    <div style="margin: 20px 0;">
+        <a href="/core/debug-progress-file/{{ task_id }}" target="_blank" class="button">
+            查看原始进度文件
+        </a>
+        <button onclick="window.location.reload()">刷新页面</button>
+    </div>
+</div>
+
+<script>
+function checkProgress() {
+    fetch('/api/task-progress/?task_id={{ task_id }}')
+        .then(response => response.json())
+        .then(data => {
+            // 更新界面显示...
+            document.getElementById('progress-bar').style.width = data.percent + '%';
+            document.getElementById('progress-message').textContent = data.message;
+            
+            if(data.status !== 'COMPLETED' && data.status !== 'FAILED') {
+                setTimeout(checkProgress, 1000);
+            }
+        });
+}
+</script>
+{% endblock %} 

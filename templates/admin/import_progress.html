@@ -129,125 +129,153 @@
 {% endblock %}
 
 {% block content %}
-<div id="content-main">
-  <div class="progress-container">
-    <h1 class="progress-title">数据导入进度</h1>
+<div id="progress-container">
+    <h1>{{ page_title }}</h1>
     
-    <div id="status-info" class="status-info running">
-      <h3 id="status-message"><span class="blink">●</span> 正在处理...</h3>
-      <div>任务ID: <span id="task-id">{{ task_id }}</span></div>
-      <div>开始时间: <span id="start-time">{{ start_time|default:"加载中..." }}</span></div>
-      <div>已处理: <span id="processed-count">0</span> 条记录</div>
+    <div class="progress-bar-container">
+        <div id="progress-bar" class="progress-bar" style="width: 0%;">0%</div>
     </div>
     
-    <div>
-      <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
-        <span>进度:</span>
-        <span id="progress-percentage">0%</span>
-      </div>
-      <div class="progress-bar-outer">
-        <div id="progress-bar" class="progress-bar-inner" style="width: 0%"></div>
-      </div>
+    <div id="status-message" class="status-message">
+        正在准备导入任务...
     </div>
     
-    <h3>导入日志:</h3>
-    <div id="log-container" class="log-container">
-      正在连接到任务状态服务...
+    <div id="progress-details" class="progress-details">
+        <p>任务ID: {{ task_id }}</p>
+        <p id="current-step">当前步骤: 准备中</p>
+        <p id="total-steps">总步骤: 0/0</p>
     </div>
     
-    <div class="action-buttons">
-      <a href="{{ admin_index_url|default:'/admin/' }}" class="btn btn-secondary">返回管理首页</a>
-      <a href="javascript:history.back();" class="btn btn-primary">返回上一页</a>
+    <div id="completion-message" class="completion-message" style="display:none;">
+        <p>导入已完成！</p>
+        <a href="{% url 'admin:index' %}" class="button">返回管理页面</a>
     </div>
-  </div>
+    
+    <div id="error-message" class="error-message" style="display:none;">
+        <p>导入过程中发生错误:</p>
+        <pre id="error-details"></pre>
+        <a href="{% url 'admin:index' %}" class="button">返回管理页面</a>
+    </div>
 </div>
 
-<script type="text/javascript">
-  document.addEventListener('DOMContentLoaded', function() {
-    const taskId = document.getElementById('task-id').textContent;
-    const statusInfo = document.getElementById('status-info');
-    const statusMessage = document.getElementById('status-message');
+<script>
+// 定期查询进度的JavaScript代码
+(function() {
+    const taskId = "{{ task_id }}";
+    const progressUrl = "{% url 'task_progress' task_id=task_id %}";
     const progressBar = document.getElementById('progress-bar');
-    const progressPercent = document.getElementById('progress-percentage');
-    const logContainer = document.getElementById('log-container');
-    const startTimeElem = document.getElementById('start-time');
-    const processedCountElem = document.getElementById('processed-count');
+    const statusMessage = document.getElementById('status-message');
+    const currentStep = document.getElementById('current-step');
+    const totalSteps = document.getElementById('total-steps');
+    const completionMessage = document.getElementById('completion-message');
+    const errorMessage = document.getElementById('error-message');
+    const errorDetails = document.getElementById('error-details');
     
-    let isCompleted = false;
-    
-    // 轮询获取任务状态
-    function pollTaskStatus() {
-      if (isCompleted) return;
-      
-      fetch(`/api/task-status/?task_id=${taskId}`)
-        .then(response => response.json())
-        .then(data => {
-          // 更新进度条
-          const progress = data.progress || 0;
-          progressBar.style.width = `${progress}%`;
-          progressPercent.textContent = `${progress}%`;
-          
-          // 更新处理记录数
-          if (data.processed_count) {
-            processedCountElem.textContent = data.processed_count;
-          }
-          
-          // 更新开始时间
-          if (data.start_time) {
-            startTimeElem.textContent = data.start_time;
-          }
-          
-          // 更新日志
-          if (data.logs && data.logs.length > 0) {
-            logContainer.innerHTML = data.logs.join('<br>');
-            logContainer.scrollTop = logContainer.scrollHeight;
-          }
-          
-          // 更新状态
-          if (data.status === 'completed') {
-            isCompleted = true;
-            statusInfo.className = 'status-info completed';
-            statusMessage.innerHTML = '✓ 导入完成';
-            
-            const completionMsg = document.createElement('div');
-            completionMsg.className = 'status-info completed';
-            completionMsg.innerHTML = `<h3>✓ 导入成功</h3>
-              <p>处理完成 ${data.processed_count || 0} 条记录</p>
-              <p>耗时: ${data.elapsed_time || '未知'}</p>`;
-            
-            if (data.summary) {
-              completionMsg.innerHTML += `<div><strong>导入摘要:</strong><br>${data.summary}</div>`;
-            }
-            
-            statusInfo.parentNode.insertBefore(completionMsg, statusInfo.nextSibling);
-            statusInfo.style.display = 'none';
-          } else if (data.status === 'error') {
-            isCompleted = true;
-            statusInfo.className = 'status-info error';
-            statusMessage.innerHTML = '✗ 导入失败';
-            
-            const errorMsg = document.createElement('div');
-            errorMsg.className = 'status-info error';
-            errorMsg.innerHTML = `<h3>✗ 导入失败</h3>
-              <p>${data.error || '未知错误'}</p>`;
-            
-            statusInfo.parentNode.insertBefore(errorMsg, statusInfo.nextSibling);
-            statusInfo.style.display = 'none';
-          }
-        })
-        .catch(error => {
-          console.error('Error fetching task status:', error);
-          logContainer.innerHTML += '<br>获取任务状态时发生错误，将在5秒后重试...';
-        });
-      
-      // 继续轮询（除非已完成）
-      if (!isCompleted) {
-        setTimeout(pollTaskStatus, 2000);
-      }
+    function updateProgress() {
+        fetch(progressUrl)
+            .then(response => response.json())
+            .then(data => {
+                // 更新进度条
+                if (data.percent !== undefined) {
+                    const percent = Math.round(data.percent);
+                    progressBar.style.width = percent + '%';
+                    progressBar.textContent = percent + '%';
+                }
+                
+                // 更新状态消息
+                if (data.message) {
+                    statusMessage.textContent = data.message;
+                }
+                
+                // 更新步骤信息
+                if (data.current_step !== undefined && data.total_steps !== undefined) {
+                    currentStep.textContent = `当前步骤: ${data.current_step}`;
+                    totalSteps.textContent = `总步骤: ${data.current_step}/${data.total_steps}`;
+                }
+                
+                // 根据状态显示不同内容
+                if (data.status === 'COMPLETED') {
+                    completionMessage.style.display = 'block';
+                    clearInterval(progressInterval);
+                } else if (data.status === 'ERROR' || data.status === 'FAILED') {
+                    errorMessage.style.display = 'block';
+                    errorDetails.textContent = data.message || '未知错误';
+                    clearInterval(progressInterval);
+                }
+            })
+            .catch(error => {
+                console.error('获取进度信息失败:', error);
+            });
     }
     
-    // 启动轮询
-    pollTaskStatus();
-  });
+    // 初始更新并设置定时更新
+    updateProgress();
+    const progressInterval = setInterval(updateProgress, 2000);
+})();
 </script>
+
+<style>
+.progress-bar-container {
+    width: 100%;
+    background-color: #f0f0f0;
+    border-radius: 4px;
+    margin: 20px 0;
+}
+
+.progress-bar {
+    height: 30px;
+    background-color: #79aec8;
+    border-radius: 4px;
+    text-align: center;
+    line-height: 30px;
+    color: white;
+    transition: width 0.5s ease-in-out;
+}
+
+.status-message {
+    margin: 20px 0;
+    padding: 10px;
+    background-color: #f8f8f8;
+    border-left: 4px solid #79aec8;
+}
+
+.progress-details {
+    margin: 20px 0;
+}
+
+.completion-message {
+    margin: 20px 0;
+    padding: 15px;
+    background-color: #dff0d8;
+    border-left: 4px solid #5cb85c;
+}
+
+.error-message {
+    margin: 20px 0;
+    padding: 15px;
+    background-color: #f2dede;
+    border-left: 4px solid #d9534f;
+}
+
+.button {
+    display: inline-block;
+    padding: 10px 15px;
+    background-color: #79aec8;
+    color: white;
+    text-decoration: none;
+    border-radius: 4px;
+    margin-top: 10px;
+}
+
+.button:hover {
+    background-color: #417690;
+}
+
+#error-details {
+    background-color: #f8f8f8;
+    padding: 10px;
+    overflow: auto;
+    max-height: 300px;
+}
+</style>
 {% endblock %} 

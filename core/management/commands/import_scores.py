@@ -20,7 +20,12 @@ from core.models import Score, Student, School, StudentHistory, Exam, Subject, G
 from datetime import datetime, timedelta
 import pandas as pd
 from scipy import stats as scipy_stats
-from core.utils.progress_tracker import ProgressTracker
+from core.tasks import ProgressTracker
+import json
+from django.conf import settings
+from django.core.cache import cache
+from django.core.management import call_command
+from io import StringIO
 
 class Command(BaseCommand):
     """
@@ -71,6 +76,8 @@ class Command(BaseCommand):
         parser.add_argument('--teacher_sheet', type=str, help='教师Excel工作表名称', default='Sheet1')
         parser.add_argument('--auto_create_missing_teachers', action='store_true', 
                             help='自动创建不存在的教师记录')
+        parser.add_argument('--tracker_passed', dest='tracker_passed', default=False, 
+                            action='store_true', help='是否已传递tracker实例')
 
     def _extract_id_info(self, id_number):
         """
@@ -705,12 +712,48 @@ class Command(BaseCommand):
         # 获取任务ID
         task_id = options.get('task_id')
         
+        # 创建本地进度字典，而不是使用ProgressTracker
+        self.progress = {
+            'task_id': task_id,
+            'current_step': 0,
+            'total_steps': 6,
+            'percent': 0,
+            'message': '开始导入...',
+            'status': 'PROCESSING',
+            'details': [],
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # 直接创建进度文件
+        if task_id:
+            progress_dir = os.path.join(settings.MEDIA_ROOT, 'progress')
+            os.makedirs(progress_dir, exist_ok=True)
+            self.progress_file = os.path.join(progress_dir, f"{task_id}.json")
+            self._save_progress()
+        
         # 初始化进度跟踪器（如果提供了任务ID）
         self.tracker = None
         if task_id:
-            from core.utils.progress_tracker import ProgressTracker
-            self.tracker = ProgressTracker(task_id)
-            self.tracker.update(message='开始加载数据文件...')
+            # 如果已传递tracker实例，则使用现有的
+            if options.get('tracker_passed'):
+
+                # 从文件加载现有进度
+                progress_file = os.path.join(settings.MEDIA_ROOT, 'progress', f"{task_id}.json")
+                if os.path.exists(progress_file):
+                    try:
+                        with open(progress_file, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                            # 创建与现有配置一致的tracker
+                            self.tracker = ProgressTracker(task_id, total_steps=data.get('total', 6))
+                    except:
+                        # 如果加载失败，创建新的
+                        self.tracker = ProgressTracker(task_id, total_steps=6)
+            else:
+                # 否则创建新的
+                self.tracker = ProgressTracker(task_id)
+                
+            # 更新当前进度
+            self.tracker.update(message="开始导入成绩数据...", status="PROCESSING")
         
         file_path = options.get('file_path')
         exam_id = options['exam_id']
@@ -777,6 +820,20 @@ class Command(BaseCommand):
                 # 先尝试使用指定的sheet_name
                 df = pd.read_excel(file_path, sheet_name=sheet_name)
                 self.stdout.write(f'成功读取工作表"{sheet_name}"，共 {len(df)} 条记录')
+                
+                # 更新进度 - 步骤1：读取Excel成功
+                if self.tracker:
+                    self.tracker.update(current=1, message=f'成功读取数据文件，共 {len(df)} 条记录')
+                
+                # 添加: 转换年级和班别字段中的中文数字为阿拉伯数字
+                if '年级' in df.columns:
+                    df['年级'] = df['年级'].astype(str).apply(self._convert_chinese_to_arabic_number)
+                    
+                if '班别' in df.columns:
+                    df['班别'] = df['班别'].astype(str).apply(self._convert_chinese_to_arabic_number)
+                    
+                self.stdout.write(f'已完成对年级和班别字段的中文数字转换')
+                    
             except Exception as e:
                 if "not found" in str(e):
                     # 如果指定的工作表未找到，尝试读取第一个工作表
@@ -864,30 +921,35 @@ class Command(BaseCommand):
                             create_students=create_students, 
                             update_students=update_students, 
                             force=force, 
-                            debug=debug
+                            debug=debug,
+                            # 添加教师导入相关参数
+                            import_teacher_history=options.get('import_teacher_history', False),
+                            teacher_file=options.get('teacher_file'),
+                            teacher_sheet=options.get('teacher_sheet', 'Sheet1')
                         )
                 
             except Exception as e:
                 self.stdout.write(self.style.ERROR(f"处理学期数据时出错: {str(e)}"))
-                raise e  # 重新抛出异常，让外层处理
-             
-            # 如果启用了教师历史导入，则执行教师历史导入
-            if options.get('import_teacher_history'):
-                teacher_file = options.get('teacher_file')
-                if not teacher_file:
-                    self.stdout.write(self.style.WARNING('未提供教师数据文件，将尝试从成绩文件中提取教师信息'))
-                    # 从成绩数据中提取教师信息
-                    self._extract_and_import_teacher_history(df, semester_id, options)
-                else:
-                    # 从指定的教师文件导入
-                    self._import_teacher_history_from_file(teacher_file, semester_id, options)
-            
+                # 在这里记录错误但不重新抛出异常
+                if hasattr(self, 'tracker') and self.tracker:
+                    self.tracker.update(status="ERROR", message=f"学生数据导入错误: {str(e)}")
+                # 移除 raise e 语句，让代码继续执行
+
+
+                    
         except Exception as e:
-            raise CommandError(f'导入过程出错: {str(e)}')
+            # 处理异常
+            self.stderr.write(self.style.ERROR(f"导入过程中发生错误: {str(e)}"))
+            if hasattr(self, 'tracker') and self.tracker:
+                self.tracker.update(status="ERROR", message=f"错误: {str(e)}")
 
     def _standard_import(self, df, exam_id, exam_name, exam_type, semester_id, teacher_id, region_id, 
                         create_students, update_students, skip_teacher, smart_match, debug):
         """标准导入逻辑，用于活跃学期"""
+        # 进度更新
+        if hasattr(self, 'tracker') and self.tracker:
+            self.tracker.update(message="开始标准导入流程...", current=3)
+        
         # 获取学期对象
         try:
             semester = Semester.objects.get(semester_id=semester_id)
@@ -905,6 +967,10 @@ class Command(BaseCommand):
         if debug:
             self.stdout.write(f"检测到以下学科: {list(subject_mapping.keys())}")
         
+        # 进度更新
+        if hasattr(self, 'tracker') and self.tracker:
+            self.tracker.update(message=f"检测到 {len(subject_mapping)} 个学科", current=4)
+        
         # 导入步骤...
         schools, school_count = self._import_schools(df, region_id, debug)
         
@@ -921,6 +987,11 @@ class Command(BaseCommand):
         # 导入成绩
         scores_created, scores_updated = self._import_scores(df, students, exams, subject_mapping, teacher_id, skip_teacher, debug)
         
+        # 进度更新 - 完成导入
+        if hasattr(self, 'tracker') and self.tracker:
+            self.tracker.update(message=f"成功导入 {scores_created} 条成绩记录，更新 {scores_updated} 条记录", current=5)
+            self.tracker.complete("导入成功完成！")
+        
         return {
             'schools': school_count,
             'grades': grade_count,
@@ -931,15 +1002,11 @@ class Command(BaseCommand):
             'scores_updated': scores_updated
         }
 
-    def _historical_import(self, df, semester_id, exam_id, exam_name, exam_type, teacher_id, skip_teacher, region_id, create_students, update_students, force=False, debug=False):
+    def _historical_import(self, df, semester_id, exam_id, exam_name, exam_type, teacher_id, skip_teacher, region_id, create_students, update_students, force=False, debug=False, import_teacher_history=False, teacher_file=None, teacher_sheet=None):
         """历史数据导入逻辑，用于非活跃学期"""
         self.stdout.write("使用历史记录导入模式...")
         
-        # 初始化进度跟踪
-        if hasattr(self, 'tracker') and self.tracker:
-            self.tracker.update(message="开始历史数据导入...", current=0, total=6)
-        
-        # 初始化统计计数器
+        # 初始化统计信息
         stats = {
             'schools_created': 0,
             'grades_created': 0,
@@ -950,6 +1017,14 @@ class Command(BaseCommand):
             'scores_updated': 0,
             'errors': 0
         }
+        
+        # 初始化成功和错误记录跟踪
+        success_records = []
+        error_records = []
+        
+        # 开始历史导入
+        if hasattr(self, 'tracker') and self.tracker:
+            self.tracker.update(message="开始历史数据导入...", current=1)
         
         # 尝试转换学期格式
         #semester_id = self.convert_semester_format(semester_id)
@@ -973,7 +1048,7 @@ class Command(BaseCommand):
         # 第1步：从Excel收集所有学校信息并创建
         self.stdout.write("步骤1: 导入学校数据...")
         if hasattr(self, 'tracker') and self.tracker:
-            self.tracker.update(message="步骤1: 导入学校数据...", current=1, total=6)
+            self._update_progress(current=1, message="步骤1: 导入学校数据...")
         
         school_map = {}  # 存储学校ID到School对象的映射
         if '学校代码' in df.columns and '学校名称' in df.columns:
@@ -1310,10 +1385,10 @@ class Command(BaseCommand):
                             if std > 0:  # 避免除以零
                                 # 计算Z分: (原始分 - 均值) / 标准差
                                 z_score = (score_value - mean) / std
-                                # 转换为更易读的分数，例如转换到均值70，标准差10的分布
-                                standard_score = 70 + (z_score * 10)
+                                # 转换为更易读的分数，例如转换到均值500，标准差100的分布
+                                standard_score = 500 + (z_score * 100)
                                 # 限制分数范围，避免极端值
-                                standard_score = max(0, min(100, standard_score))
+                                standard_score = max(200, standard_score)
                             else:
                                 standard_score = score_value  # 如果标准差为0，使用原始分
                         else:
@@ -1339,10 +1414,13 @@ class Command(BaseCommand):
                         
                         if score_created:
                             stats['scores_created'] += 1
+                            success_records.append(score_id)
                         else:
                             stats['scores_updated'] += 1
+                            success_records.append(score_id)
                     except Exception as e:
                         stats['errors'] += 1
+                        error_records.append(student_id)
                         if debug and stats['errors'] <= 5:  # 只显示前5个错误
                             self.stdout.write(self.style.ERROR(f"  创建成绩记录失败: {str(e)}"))
             
@@ -1362,18 +1440,44 @@ class Command(BaseCommand):
         else:
             self.stdout.write(f"错误数量: 0 条")
         self.stdout.write("="*80)
+                    # 成绩导入后，单独处理教师历史导入，防止被前面的异常处理影响
         
+        if teacher_file:
+            try:
+                self.stdout.write(self.style.SUCCESS("开始导入教师历史数据..."))
+                teacher_stats = self.import_teacher_history(
+                    teacher_file=teacher_file,
+                    semester_id=semester_id
+                )
+                self.stdout.write(self.style.SUCCESS(f"教师历史数据导入完成: 创建 {teacher_stats['created']} 条, 更新 {teacher_stats['updated']} 条, 错误 {teacher_stats['errors']} 条"))
+            except Exception as e:
+                self.stdout.write(self.style.ERROR(f"导入教师历史数据失败: {str(e)}"))
+            else:
+                self.stdout.write(self.style.WARNING('未提供教师数据文件，跳过教师历史导入'))
         self.stdout.write(self.style.SUCCESS(f"历史导入完成，共处理 {historical_count} 条记录"))
         
-        # 完成导入，更新进度跟踪器
-        if hasattr(self, 'tracker') and self.tracker:
-            self.tracker.update(
-                message=f"导入完成！共处理 {historical_count} 条记录，创建 {stats['scores_created']} 条成绩",
-                current=6,
-                total=6
-            )
+        # 在历史导入完成时添加
+        successful_imports = len(success_records)
+        failed_imports = len(error_records)
+        self.stdout.write(self.style.SUCCESS(f'成功导入 {successful_imports} 条成绩记录，失败 {failed_imports} 条'))
         
-        return stats
+
+        # 查看进度是否正确更新
+        if hasattr(self, 'tracker') and self.tracker:
+            # 使用新的进度系统标记任务完成
+            self._update_progress(current=6, message=f"导入完成！共处理 {total_records} 条记录，创建 {successful_imports} 条成绩", status="COMPLETED")
+
+        # 添加明确的日志和返回语句
+        self.stdout.write(self.style.SUCCESS("历史导入处理完毕，正在返回到主流程..."))
+        return {
+            'schools': stats['schools_created'],
+            'grades': stats['grades_created'],
+            'classes': stats['classes_created'],
+            'students_created': stats['students_created'],
+            'students_updated': stats['students_found'],
+            'scores_created': stats['scores_created'],
+            'scores_updated': stats['scores_updated']
+        }
 
     def _match_subject(self, column_name):
         """
@@ -2122,4 +2226,169 @@ class Command(BaseCommand):
             error_count += 1
             
         return created_count, updated_count, error_count
+
+    def _convert_chinese_to_arabic_number(self, text):
+        """
+        将中文数字转换为阿拉伯数字。
+        
+        Args:
+            text: 包含数字的字符串
+            
+        Returns:
+            str: 转换后的字符串，中文数字被替换为阿拉伯数字
+        """
+        if not text or not isinstance(text, str):
+            return text
+            
+        # 中文数字映射表
+        chinese_nums = {
+            '零': '0', '一': '1', '二': '2', '三': '3', '四': '4',
+            '五': '5', '六': '6', '七': '7', '八': '8', '九': '9',
+            '十': '10', '百': '00', '千': '000', '万': '0000',
+            '〇': '0'  # 圆圈的零
+        }
+        
+        # 学段前缀映射
+        grade_prefixes = {
+            '小': '', '初': '', '高': '',
+            '小学': '', '初中': '', '高中': '',
+        }
+        
+        # 移除学段前缀
+        for prefix, replacement in grade_prefixes.items():
+            if text.startswith(prefix):
+                text = text.replace(prefix, replacement, 1)
+        
+        # 移除年级、班等后缀
+        suffixes = ['年级', '班', '级']
+        for suffix in suffixes:
+            if text.endswith(suffix):
+                text = text[:-len(suffix)]
+        
+        # 特殊处理：初一、初二等格式直接映射
+        special_grades = {
+            '初一': '7', '初二': '8', '初三': '9',
+            '高一': '10', '高二': '11', '高三': '12',
+            '小一': '1', '小二': '2', '小三': '3', '小四': '4', '小五': '5', '小六': '6'
+        }
+        
+        if text in special_grades:
+            return special_grades[text]
+        
+        # 替换中文数字
+        result = text
+        for cn, ar in chinese_nums.items():
+            result = result.replace(cn, ar)
+        
+        # 如果结果仍包含非数字字符，尝试提取数字部分
+        if not result.isdigit():
+            digits = ''.join(c for c in result if c.isdigit())
+            if digits:
+                result = digits
+        
+        return result
+
+    def _update_progress(self, current=None, message=None, status=None):
+        """更新本地进度并保存到文件"""
+        if current is not None:
+            self.progress['current_step'] = current
+            self.progress['percent'] = int((current / self.progress['total_steps']) * 100)
+            
+        if message:
+            self.progress['message'] = message
+            self.progress['details'].append(message)
+            
+        if status:
+            self.progress['status'] = status
+            
+        self.progress['timestamp'] = datetime.now().isoformat()
+        self._save_progress()
+        
+    def _save_progress(self):
+        """保存进度到文件"""
+        if hasattr(self, 'progress_file'):
+            with open(self.progress_file, 'w', encoding='utf-8') as f:
+                json.dump(self.progress, f, ensure_ascii=False)
+            
+            # 同时保存到缓存
+            cache_key = f"task_progress_{self.progress['task_id']}"
+            cache.set(cache_key, self.progress, 3600)
+
+    def import_teacher_history(self, teacher_file, semester_id, teacher_sheet='Sheet1', debug=False):
+        """
+        导入教师历史数据
+        
+        Args:
+            teacher_file: 教师数据文件路径
+            semester_id: 学期ID
+            teacher_sheet: Excel工作表名称
+            debug: 是否启用调试模式
+            
+        Returns:
+            导入统计信息
+        """
+        # 更新进度信息
+        self._update_progress(current=5, message="开始导入教师历史数据...")
+        
+        if not os.path.exists(teacher_file):
+            self.stdout.write(self.style.ERROR(f"教师数据文件不存在: {teacher_file}"))
+            return {'created': 0, 'updated': 0, 'errors': 1}
+            
+        try:
+            # 获取学期对象
+            try:
+                semester = Semester.objects.get(semester_id=semester_id)
+            except Semester.DoesNotExist:
+                self.stdout.write(self.style.ERROR(f"学期不存在: {semester_id}"))
+                return {'created': 0, 'updated': 0, 'errors': 1}
+                
+            # 读取Excel文件
+            df = pd.read_excel(teacher_file, sheet_name=teacher_sheet)
+            self.stdout.write(f'成功读取教师文件，共 {len(df)} 条记录')
+            
+
+
+            
+            # 使用StringIO捕获命令输出
+            output = StringIO()
+            
+            args = [
+                teacher_file,
+                '--semester-id', semester_id,
+                '--sheet', teacher_sheet,
+                '--auto-create-classes'
+            ]
+            
+            if debug:
+                args.append('--debug')
+                
+            # 执行教师历史导入命令并捕获输出
+            self.stdout.write("调用教师历史导入命令...")
+            call_command('import_teacher_history', *args, stdout=output)
+            
+            # 从输出中尝试解析统计信息
+            output_text = output.getvalue()
+            stats = {'created': 0, 'updated': 0, 'errors': 0}
+            
+            # 尝试从输出中提取统计信息
+            import re
+            created_match = re.search(r'新建\s+(\d+)', output_text)
+            updated_match = re.search(r'更新\s+(\d+)', output_text)
+            errors_match = re.search(r'错误\s+(\d+)', output_text)
+            
+            if created_match:
+                stats['created'] = int(created_match.group(1))
+            if updated_match:
+                stats['updated'] = int(updated_match.group(1))
+            if errors_match:
+                stats['errors'] = int(errors_match.group(1))
+            
+            self._update_progress(current=6, message=f"教师历史数据导入完成: 创建 {stats['created']} 条, 更新 {stats['updated']} 条")
+            return stats
+            
+        except Exception as e:
+            import traceback
+            error_msg = f"导入教师历史数据错误: {str(e)}\n{traceback.format_exc()}"
+            self.stdout.write(self.style.ERROR(error_msg))
+            return {'created': 0, 'updated': 0, 'errors': 1}
 

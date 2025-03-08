@@ -889,3 +889,61 @@ def test_task_launch(request):
         'task_id': task_id,
         'title': '测试任务启动'
     })
+
+def task_status_api(request):
+    """任务状态API，返回进度跟踪信息"""
+    task_id = request.GET.get('task_id')
+    if not task_id:
+        return JsonResponse({'status': 'error', 'message': '缺少任务ID'})
+        
+    # 尝试从缓存获取
+    cache_key = f"task_progress_{task_id}"
+    progress_data = cache.get(cache_key)
+    
+    # 如果缓存中没有，尝试从文件获取
+    if not progress_data:
+        progress_file = os.path.join(settings.MEDIA_ROOT, 'progress', f"{task_id}.json")
+        if os.path.exists(progress_file):
+            try:
+                with open(progress_file, 'r', encoding='utf-8') as f:
+                    progress_data = json.load(f)
+            except:
+                pass
+    
+    if not progress_data:
+        return JsonResponse({
+            'status': 'error', 
+            'message': '任务状态未找到',
+            'progress': 0,
+            'logs': ['任务状态未找到，可能任务ID无效或者任务已过期']
+        })
+    
+    # 转换为API响应格式
+    return JsonResponse({
+        'status': progress_data.get('status', 'processing').lower(),
+        'progress': progress_data.get('percent', 0),
+        'processed_count': progress_data.get('current', 0),
+        'logs': progress_data.get('details', []),
+        'error': '\n'.join(progress_data.get('errors', [])),
+        'start_time': progress_data.get('start_time', '未知')
+    })
+
+@staff_member_required
+def simple_import_progress_view(request):
+    """
+    简化版导入进度查看页面
+    """
+    task_id = request.GET.get('task_id', '')
+    return render(request, 'admin/simple_import_progress.html', {
+        'task_id': task_id,
+        'title': '导入状态查看'
+    })
+
+@staff_member_required
+def static_progress_view(request):
+    """完全静态的进度查看页面，不发送任何API请求"""
+    task_id = request.GET.get('task_id', '')
+    return render(request, 'admin/static_progress.html', {
+        'task_id': task_id,
+        'title': '静态任务状态'
+    })

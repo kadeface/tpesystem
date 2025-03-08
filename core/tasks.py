@@ -8,6 +8,8 @@ import time
 from django.core.cache import cache
 import json
 import locale
+import tempfile
+from datetime import datetime
 # 配置根日志记录器
 logging.basicConfig(level=logging.DEBUG, 
                    format='[%(asctime)s] %(message)s',
@@ -21,24 +23,25 @@ class ProgressTracker:
     
     Args:
         task_id: 任务唯一标识符
+        total_steps: 总步骤数
         
     Returns:
         ProgressTracker实例
     """
-    def __init__(self, task_id, timeout=3600, total_steps=100):
+    def __init__(self, task_id, total_steps=6, timeout=3600):
         """
         初始化进度跟踪器。
         
         Args:
             task_id: 任务ID
-            timeout: 超时时间（秒）
             total_steps: 总步骤数
+            timeout: 缓存超时时间（秒）
         
         Returns:
             无返回值
         """
         self.task_id = task_id
-        self.timeout = timeout
+        self.timeout = timeout  # 保留这个属性
         self.total_steps = total_steps
         self.current_step = 0
         self.status = "PENDING"
@@ -46,11 +49,12 @@ class ProgressTracker:
         self.details = []
         self.errors = []
         self.percent = 0
+        self.start_time = None
         
         # 初始化进度
         self.save()
 
-    def update(self, message=None, current=None, total=None, status=None):
+    def update(self, message=None, current=None, total=None, status=None, start_time=None):
         """
         更新进度信息。
         
@@ -59,6 +63,7 @@ class ProgressTracker:
             current: 当前步骤
             total: 总步骤数
             status: 状态
+            start_time: 开始时间
         
         Returns:
             无返回值
@@ -82,6 +87,8 @@ class ProgressTracker:
         
         if current is not None:
             self.current_step = current
+            # 确保百分比更新
+            self.percent = int((self.current_step / self.total_steps) * 100)
         
         if total is not None:
             self.total_steps = total
@@ -89,9 +96,8 @@ class ProgressTracker:
         if status:
             self.status = status
             
-        # 计算百分比
-        if self.total_steps > 0:
-            self.percent = int((self.current_step / self.total_steps) * 100)
+        if start_time:  # 添加这个判断
+            self.start_time = start_time
             
         # 保存进度
         self.save()
@@ -155,17 +161,16 @@ class ProgressTracker:
             "percent": self.percent,
             "message": self.message,
             "details": self.details,
-            "errors": self.errors
+            "errors": self.errors,
+            "start_time": self.start_time
         }
         
         # 使用缓存存储进度
         cache_key = f"task_progress_{self.task_id}"
-        cache.set(cache_key, progress_data, self.timeout)
+        cache.set(cache_key, progress_data, 3600)
         
-        # 同时保存到文件系统作为备份
-        progress_dir = os.path.join(settings.MEDIA_ROOT, 'progress')
-        os.makedirs(progress_dir, exist_ok=True)
-        progress_file = os.path.join(progress_dir, f"{self.task_id}.json")
+        # 同时保存到文件系统
+        progress_file = os.path.join(settings.MEDIA_ROOT, 'progress', f"{self.task_id}.json")
         with open(progress_file, 'w', encoding='utf-8') as f:
             json.dump(progress_data, f, ensure_ascii=False)
 
@@ -173,7 +178,8 @@ def run_import_task_async(file_path, exam_id, exam_name, exam_type, semester_id,
                          teacher_id, region_id, sheet_name, create_students, 
                          update_students, skip_teacher, debug, smart_match, force, task_id,
                          import_teacher_history=False, teacher_file=None, 
-                         teacher_sheet='Sheet1', auto_create_missing_teachers=False):
+                         teacher_sheet='Sheet1', auto_create_missing_teachers=False,
+                         existing_tracker=None):
     """
     异步运行导入任务。
     
@@ -197,12 +203,24 @@ def run_import_task_async(file_path, exam_id, exam_name, exam_type, semester_id,
         teacher_file: 教师历史数据文件路径
         teacher_sheet: 教师历史数据工作表名称
         auto_create_missing_teachers: 是否自动创建不存在的教师
+        existing_tracker: 可选的现有进度跟踪器实例
     
     Returns:
         任务执行结果字典
     """
-    # 初始化进度跟踪器
-    tracker = ProgressTracker(task_id)
+    # 使用传入的tracker或创建新的
+    if existing_tracker:
+        tracker = existing_tracker
+    else:
+        # 初始化进度跟踪器 - 使用与子进程相同的total_steps=6
+        tracker = ProgressTracker(task_id, total_steps=6)
+        
+        # 设置开始时间
+        start_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        tracker.update(message=f'开始导入任务...', status='PROCESSING', start_time=start_time)
+    
+    # 添加这行定义
+    manage_py = os.path.join(settings.BASE_DIR, 'manage.py')
     
     # 创建日志目录和文件
     log_dir = os.path.join(settings.MEDIA_ROOT, 'debug')
@@ -215,140 +233,118 @@ def run_import_task_async(file_path, exam_id, exam_name, exam_type, semester_id,
     logger.addHandler(file_handler)
     
     try:
-        print(f"开始导入任务 ID: {task_id}")
-        logger.info(f"开始导入任务 ID: {task_id}")
-        tracker.update(message='开始导入任务...')
-        
-        # 记录任务参数
-        logger.info(f"任务参数: 文件={file_path}, 考试ID={exam_id}, 考试名称={exam_name}")
-        tracker.update(message=f"任务参数: 文件={file_path}, 考试ID={exam_id}")
-        
-        # 构建完整的命令参数
-        cmd_args = {
-            'file_path': file_path,
-            'exam_id': exam_id,
-            'exam_name': exam_name,
-            'exam_type': exam_type,
-            'semester': semester_id,
-            'teacher_id': teacher_id,
-            'region_id': region_id,
-            'sheet': sheet_name,
-            'create_students': create_students,
-            'update_students': update_students,
-            'skip_teacher': skip_teacher,
-            'debug': debug,
-            'smart_match': smart_match,
-            'force': force,
-            'task_id': task_id
-        }
-        
-        # 添加教师历史导入相关参数
-        if import_teacher_history:
-            cmd_args['import_teacher_history'] = True
-            
-            if teacher_file:
-                cmd_args['teacher_file'] = teacher_file
-                
-            if teacher_sheet:
-                cmd_args['teacher_sheet'] = teacher_sheet
-                
-            if auto_create_missing_teachers:
-                cmd_args['auto_create_missing_teachers'] = True
-        
-        # 构建命令参数
-        manage_py = os.path.join(settings.BASE_DIR, 'manage.py')
-        
+        # 在原日志基础上增加调试信息（保持原有日志结构）
+        print(f"[TASK INIT] 开始处理任务 {task_id}")
+        logger.info(f"=== 任务初始化 ===\n文件路径: {file_path}\n学期ID: {semester_id}")
+
+        # 保持原有命令构建结构，增加路径引号处理
         args = [
-            sys.executable,  # Python 解释器路径
+            sys.executable,
             manage_py,
             'import_scores',
-            '--file_path', file_path,
+            '--file_path', file_path,  
             '--exam_id', exam_id,
             '--exam_name', exam_name,
             '--exam_type', exam_type,
             '--semester', semester_id,
-            '--task_id', task_id  # 传递任务ID给命令
+            '--task_id', task_id,
+            '--tracker_passed'  # 正确格式：不传递值
         ]
-        
-        # 添加可选参数
-        if teacher_id:
-            args.extend(['--teacher_id', teacher_id])
-        if region_id:
-            args.extend(['--region_id', region_id])
-        if sheet_name:
-            args.extend(['--sheet', sheet_name])
-        if create_students:
-            args.append('--create_students')
-        if update_students:
-            args.append('--update_students')
-        if skip_teacher:
-            args.append('--skip_teacher')
-        if debug:
-            args.append('--debug')
-        if smart_match:
-            args.append('--smart_match')
-        if force:
-            args.append('--force')
-        
-        # 记录执行命令
-        cmd_str = ' '.join(args)
-        logger.info(f"执行命令: {cmd_str}")
 
-        env = os.environ.copy()
-        env.update({
-            'PYTHONIOENCODING': 'utf-8',  # 强制子进程使用UTF-8输出
-            'PYTHONUTF8': '1'  # 对于Python 3.7+ 确保UTF-8模式
-        })
-
-        # 启动子进程运行导入命令
-        process = subprocess.Popen(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            text=False,  # 使用二进制模式
-            bufsize=1    # 行缓冲
-        )
+        # 保持原有可选参数添加方式，增加空值过滤
+        if teacher_id and teacher_id.strip():  # 原代码增加有效性检查
+            args.extend(['--teacher_id', teacher_id.strip()])
         
-        # 实时读取输出
-        while True:
-            output = process.stdout.readline()
-            if output == b'' and process.poll() is not None:
-                break
-            if output:
-                try:
-                    # 尝试使用多种编码解码
-                    decoded_output = output.decode('utf-8', errors='replace').strip()
-                except UnicodeDecodeError:
-                    try:
-                        # 如果utf-8失败，尝试使用cp936（中文Windows系统）
-                        decoded_output = output.decode('cp936', errors='replace').strip()
-                    except:
-                        # 最后的后备方案
-                        decoded_output = repr(output)
+        if region_id and str(region_id).isdigit():  # 原代码增加验证
+            args.extend(['--region_id', str(region_id)])
+        
+        # 2. 修复临时文件问题
+        with tempfile.NamedTemporaryFile(delete=False, mode='w+', encoding='utf-8') as tmp:
+            tmp_path = tmp.name
+            
+            # 使用list形式的args避免shell解析问题
+            process = subprocess.Popen(
+                args,
+                stdout=tmp,
+                stderr=tmp,
+                env=os.environ.copy(),
+                shell=False,  # 改为False避免shell解析
+                cwd=os.path.dirname(manage_py)
+            )
+            
+            # 确保文件已关闭
+            tmp.close()
+            
+            # 等待进程完成
+            process.wait()
+            
+            # 读取并处理输出
+            try:
+                # 尝试多种编码方式读取文件
+                encodings = ['utf-8', 'gbk', 'cp936', 'latin1']
+                output_read = False
                 
-                # 记录到日志文件
-                logger.info(f"命令输出: {decoded_output}")
-                # 更新进度信息
-                tracker.update(message=decoded_output)
-        
-        # 捕获任何错误输出
-        stderr = process.stderr.read()
-        if stderr:
-            logger.error(f"错误输出:\n{stderr}")
-            tracker.add_error(stderr)
+                for encoding in encodings:
+                    try:
+                        with open(tmp_path, 'r', encoding=encoding) as f:
+                            for line in f:
+                                line = line.strip()
+                                if line:
+                                    # 检查是否为进度信息，如果是则跳过
+                                    if "进度更新:" in line:
+                                        continue
+                                    # 其他输出正常记录
+                                    logger.info(f"命令输出: {line}")
+                                    tracker.update(message=line)
+                        output_read = True
+                        logger.info(f"成功使用 {encoding} 编码读取输出")
+                        break
+                    except UnicodeDecodeError:
+                        logger.warning(f"使用 {encoding} 解码失败，尝试下一种编码")
+                        continue
+                
+                if not output_read:
+                    # 如果所有编码都失败，尝试二进制模式读取
+                    with open(tmp_path, 'rb') as f:
+                        binary_data = f.read()
+                        # 尝试检测编码
+                        try:
+                            import chardet
+                            result = chardet.detect(binary_data)
+                            detected_encoding = result['encoding']
+                            logger.info(f"检测到编码: {detected_encoding}")
+                            text = binary_data.decode(detected_encoding, errors='replace')
+                        except ImportError:
+                            # 如果没有chardet，使用替换模式解码
+                            text = binary_data.decode('utf-8', errors='replace')
+                        
+                        for line in text.splitlines():
+                            if line.strip():
+                                # 检查是否为进度信息，如果是则跳过
+                                if "进度更新:" in line:
+                                    continue
+                                # 其他输出正常记录
+                                logger.info(f"命令输出: {line.strip()}")
+                                tracker.update(message=line.strip())
+            finally:
+                # 确保文件读取完毕后再尝试删除
+                try:
+                    os.remove(tmp_path)
+                except Exception as e:
+                    logger.warning(f"无法删除临时文件: {str(e)}")
+                    # 忽略删除错误，不影响主流程
         
         # 检查返回码
         return_code = process.poll()
         if return_code == 0:
             logger.info("导入成功完成！")
-            tracker.complete("导入成功完成！")
+            tracker.update(status="COMPLETED", message="导入成功完成！")
             return {'success': True, 'task_id': task_id}
         else:
             error_msg = f"导入失败，返回代码：{return_code}"
             logger.error(error_msg)
             tracker.fail(error_msg)
-            return {'success': False, 'task_id': task_id, 'error': stderr}
+            return {'success': False, 'task_id': task_id, 'error': "详见日志文件"}
             
     except Exception as e:
         # 记录异常
@@ -364,6 +360,16 @@ def run_import_task_async(file_path, exam_id, exam_name, exam_type, semester_id,
         # 移除和关闭文件处理器
         logger.removeHandler(file_handler)
         file_handler.close()
+
+    # 在 _historical_import 方法结束前添加
+    if hasattr(self, 'tracker') and self.tracker:
+        # 强制设置并保存进度
+        self.tracker.current_step = 6
+        self.tracker.percent = 100
+        self.tracker.save()
+        
+        # 再次调用 complete 以确保更新
+        self.tracker.complete("历史数据导入成功完成！")
 
 def run_import_task_async_session(file_path, exam_id, exam_name, exam_type, semester,
                                 teacher_id, region, sheet_name, create_students,
@@ -388,11 +394,6 @@ def run_import_task_async_session(file_path, exam_id, exam_name, exam_type, seme
         tracker.update(message=f"文件路径: {file_path}")
         tracker.update(message=f"会话ID: {session_key}")
 
-        # 添加心跳，确保会话不会过期
-        tracker.update(message=f"启动导入处理...")
-
-        # 每10秒更新一次心跳，确保会话不会过期
-        tracker.update(message='任务正在执行中...请耐心等待')
 
         # 构建命令参数
         manage_py = os.path.join(settings.BASE_DIR, 'manage.py')
@@ -438,44 +439,40 @@ def run_import_task_async_session(file_path, exam_id, exam_name, exam_type, seme
             'PYTHONUTF8': '1'  # 对于Python 3.7+ 确保UTF-8模式
         })
 
-        # 启动子进程运行导入命令
-        process = subprocess.Popen(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,  # 添加环境变量
-            text=False,  # 使用二进制模式
-            bufsize=1    # 行缓冲
-        )
-        # 在循环读取输出的部分修改：
-        sys_encoding = locale.getpreferredencoding()
-        # 实时读取输出
-        while True:
-            output = process.stdout.readline()
-            if output == b'' and process.poll() is not None:
-                break
-            if output:
-                try:
-                    # 优先尝试系统编码解码
-                    decoded_output = output.decode(sys_encoding, errors='replace').strip()
-                except UnicodeDecodeError:
-                    try:
-                        # 其次尝试UTF-8
-                        decoded_output = output.decode('utf-8', errors='replace').strip()
-                    except:
-                        # 最后的后备方案
-                        decoded_output = repr(output)
-
-                # 打印到服务器日志
-                print(f"命令输出: {decoded_output}")
-                # 更新进度信息
-                tracker.update(message=decoded_output)
-
-        # 捕获任何错误输出
-        stderr = process.stderr.read()
-        if stderr:
-            tracker.add_error(stderr)
-
+        # 方法1：使用临时文件捕获输出
+        with tempfile.NamedTemporaryFile(delete=False, mode='w+', encoding='utf-8') as tmp:
+            tmp_path = tmp.name
+            # 将输出重定向到文件
+            process = subprocess.Popen(
+                args,
+                stdout=tmp,
+                stderr=tmp,
+                env=env,
+                shell=True,
+                cwd=os.path.dirname(manage_py)
+            )
+            
+            # 等待进程完成
+            process.wait()
+            
+            # 重新打开文件读取输出
+            with open(tmp_path, 'r', encoding='utf-8') as f:
+                output_lines = f.readlines()
+                
+            # 处理所有输出行
+            for line in output_lines:
+                line = line.strip()
+                if line:
+                    # 检查是否为进度信息，如果是则跳过
+                    if "进度更新:" in line:
+                        continue
+                    # 其他输出正常记录
+                    logger.info(f"命令输出: {line}")
+                    tracker.update(message=line)
+            
+            # 删除临时文件
+            os.unlink(tmp_path)
+        
         # 检查返回码
         return_code = process.poll()
         if return_code == 0:
@@ -483,7 +480,7 @@ def run_import_task_async_session(file_path, exam_id, exam_name, exam_type, seme
             return {'success': True, 'task_id': task_id}
         else:
             tracker.fail(f"导入失败，返回代码：{return_code}")
-            return {'success': False, 'task_id': task_id, 'error': stderr}
+            return {'success': False, 'task_id': task_id, 'error': "详见日志文件"}
 
     except Exception as e:
         tracker.fail(f"导入过程发生错误: {str(e)}")

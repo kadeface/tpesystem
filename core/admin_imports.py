@@ -14,14 +14,78 @@ from django.core.files.storage import FileSystemStorage
 import os
 import threading
 import uuid
-from .tasks import run_import_task_async
-
-# 导入admin_site
-
+from django.core.management import call_command
+from django.core.management.base import CommandError
+from django.http import JsonResponse, HttpResponseRedirect
+from django.urls import reverse
 from .models import  Semester, Region, Teacher
+from core.tasks import ProgressTracker
+import json
 
-from .utils.progress_tracker import ProgressTracker
-
+# 创建一个本地的导入函数替代异步任务
+def run_import_task_sync(file_path, exam_id, exam_name, exam_type, semester_id, 
+                       teacher_id, region_id, sheet_name, create_students, 
+                       update_students, skip_teacher, debug, smart_match, force, task_id,
+                       import_teacher_history=False, teacher_file=None, 
+                       teacher_sheet='Sheet1', auto_create_missing_teachers=False,
+                       existing_tracker=None):
+    """
+    直接运行导入任务，不使用异步方式
+    
+    Args:
+        file_path: 文件路径
+        task_id: 任务ID用于跟踪进度
+        
+    Returns:
+        任务执行结果字典
+    """
+    try:
+        # 创建命令参数字典
+        kwargs = {
+            'file_path': file_path,
+            'exam_id': exam_id,
+            'exam_name': exam_name,
+            'exam_type': exam_type,
+            'semester': semester_id,
+            'task_id': task_id
+        }
+        
+        # 添加可选参数
+        if teacher_id:
+            kwargs['teacher_id'] = teacher_id
+        if region_id:
+            kwargs['region_id'] = region_id
+        if sheet_name:
+            kwargs['sheet'] = sheet_name
+        if create_students:
+            kwargs['create_students'] = True
+        if update_students:
+            kwargs['update_students'] = True
+        if skip_teacher:
+            kwargs['skip_teacher'] = True
+        if debug:
+            kwargs['debug'] = True
+        if smart_match:
+            kwargs['smart_match'] = True
+        if force:
+            kwargs['force'] = True
+            
+        # 执行命令
+        call_command('import_scores', **kwargs)
+        return {'success': True, 'task_id': task_id}
+        
+    except Exception as e:
+        # 记录错误
+        import traceback
+        error_msg = f"导入过程发生错误: {str(e)}"
+        print(error_msg)
+        print(traceback.format_exc())
+        
+        # 如果有进度跟踪器，标记为失败
+        if existing_tracker:
+            existing_tracker.fail(error_msg)
+            
+        return {'success': False, 'task_id': task_id, 'error': str(e)}
 
 class ScoresImportForm(forms.Form):
     """
@@ -343,27 +407,25 @@ class ImportDataAdmin(admin.ModelAdmin):
                         # 准备参数
                         kwargs = ImportDataAdmin._prepare_task_kwargs(form, file_path, task_id, teacher_file_path, teacher_sheet)
                         
-                        # 启动异步任务
+                        # 创建进度跟踪器实例
+                        tracker = ProgressTracker(task_id=task_id, total_steps=6)
+                        tracker.update(status='PROCESSING', message='正在准备导入任务...')
+                        
+                        # 将现有追踪器传递给任务
+                        kwargs['existing_tracker'] = tracker
+                        
+                        # 在后台线程中执行任务
                         thread = threading.Thread(
                             target=task_handler,
                             kwargs=kwargs,
                             daemon=True
                         )
-                        # 添加任务状态初始化
-                        tracker = ProgressTracker(task_id=task_id)
-                        tracker.status = 'PROCESSING'
-                        tracker.message = '开始处理导入任务'
-                        tracker.save()  # 确保保存初始状态
-
                         thread.start()
-                        
-                        # 添加调试输出
-                        if form.cleaned_data.get('debug', True):
-                            print(f"启动异步任务，任务ID: {task_id}")
-                        
-                        # 重定向到进度页面
-                        return redirect(f"/core/import-progress/?task_id={task_id}")
-                        
+
+                        # 立即重定向到进度页面，不需要在 session 中存储任务信息
+                        return HttpResponseRedirect(
+                            reverse('import_progress') + f'?task_id={task_id}'
+                        )
                     except Exception as e:
                         # 记录异常
                         print(f"导入初始化错误: {str(e)}")
@@ -424,9 +486,9 @@ class ImportDataAdmin(admin.ModelAdmin):
                 'exam_id': form.cleaned_data['exam_id'],
                 'exam_name': form.cleaned_data['exam_name'], 
                 'exam_type': form.cleaned_data['exam_type'],
-                'semester': form.cleaned_data['semester'].semester_id,
+                'semester_id': form.cleaned_data['semester'].semester_id,
                 'teacher_id': str(form.cleaned_data.get('teacher_id', 'T001')),
-                'region': form.cleaned_data['region'].region_id,
+                'region_id': form.cleaned_data['region'].region_id,
                 'sheet_name': form.cleaned_data['sheet_name'],
                 'create_students': form.cleaned_data['create_students'],
                 'update_students': form.cleaned_data['update_students'],
@@ -454,13 +516,13 @@ class ImportDataAdmin(admin.ModelAdmin):
     # 使用工厂方法创建视图函数
     scores_import_view = _build_import_view(
         form_class=ScoresImportForm,
-        task_handler=run_import_task_async,
+        task_handler=run_import_task_sync,
         title="导入学生成绩数据（如果是学生过去的成绩，可以选择导入教师历史记录）"
     )
     
     teacher_import_view = _build_import_view(
         form_class=TeacherSubjectsImportForm,
-        task_handler=run_import_task_async,  # 使用相同的导入处理器
+        task_handler=run_import_task_sync,  # 使用相同的导入处理器
         title="导入教师学科班级关联数据"
     )
 
@@ -486,4 +548,94 @@ def convert_semester_format(semester_obj):
         return semester_obj.replace('学年第', '-').replace('学期', '')
     
     # 如果都不是，尝试将对象转换为字符串
-    return str(semester_obj) 
+    return str(semester_obj)
+
+def import_scores_view(request):
+    """处理成绩导入请求的视图函数"""
+    if request.method == 'POST':
+        # 获取表单数据
+        file_path = request.POST.get('file_path')
+        exam_id = request.POST.get('exam_id')
+        exam_name = request.POST.get('exam_name')
+        exam_type = request.POST.get('exam_type', 'MIDTERM')
+        semester = request.POST.get('semester')
+        teacher_id = request.POST.get('teacher_id')
+        region_id = request.POST.get('region_id')
+        sheet_name = request.POST.get('sheet_name', 'Sheet1')
+        
+        # 获取复选框选项
+        create_students = 'create_students' in request.POST
+        update_students = 'update_students' in request.POST
+        skip_teacher = 'skip_teacher' in request.POST
+        debug = 'debug' in request.POST
+        smart_match = 'smart_match' in request.POST
+        force = 'force' in request.POST
+        
+        # 生成任务ID
+        task_id = str(uuid.uuid4())
+        
+        # 直接调用命令
+        try:
+            kwargs = {
+                'file_path': file_path,
+                'exam_id': exam_id,
+                'exam_name': exam_name,
+                'exam_type': exam_type,
+                'semester': semester,
+                'teacher_id': teacher_id,
+                'region_id': region_id,
+                'sheet': sheet_name,
+                'task_id': task_id,
+                'debug': debug,
+                'smart_match': smart_match,
+                'force': force,
+            }
+            
+            # 添加布尔参数
+            if create_students:
+                kwargs['create_students'] = True
+            if update_students:
+                kwargs['update_students'] = True
+            if skip_teacher:
+                kwargs['skip_teacher'] = True
+            
+            # 调用命令
+            call_command('import_scores', **kwargs)
+            result = {'success': True, 'task_id': task_id}
+        except Exception as e:
+            result = {'success': False, 'task_id': task_id, 'error': str(e)}
+        
+        # 重定向到进度页面
+        return HttpResponseRedirect(
+            reverse('static_progress') + f'?task_id={task_id}'
+        )
+
+def task_progress_view(request, task_id):
+    """获取任务进度的API视图"""
+    task_id = str(task_id)
+    # 直接从文件读取进度信息
+    progress_file = os.path.join(settings.MEDIA_ROOT, 'progress', f"{task_id}.json")
+    if os.path.exists(progress_file):
+        try:
+            with open(progress_file, 'r', encoding='utf-8') as f:
+                progress_data = json.load(f)
+        except:
+            progress_data = {"status": "ERROR", "message": "无法读取进度文件"}
+    else:
+        progress_data = {"status": "NOT_FOUND", "message": "找不到任务进度"}
+    
+    return JsonResponse(progress_data)
+
+def import_progress_view(request):
+    """显示导入进度页面的视图函数"""
+    task_id = request.GET.get('task_id')
+    if not task_id:
+        return HttpResponseRedirect(reverse('admin:index'))
+    
+    context = {
+        'task_id': task_id,
+        'page_title': '导入进度',
+    }
+    
+    # 渲染进度页面模板
+    return render(request, 'admin/import_progress.html', context) 
