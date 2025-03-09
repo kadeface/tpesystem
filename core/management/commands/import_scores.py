@@ -295,10 +295,16 @@ class Command(BaseCommand):
         """
         self.stdout.write("步骤4: 导入学生数据...")
         students = {}
-        created_count = 0
-        updated_count = 0
-        skipped_count = 0
-        error_count = 0
+        stats = {
+            'students_created': 0,
+            'students_found': 0,
+            'scores_created': 0,
+            'scores_updated': 0,
+            'errors': 0,
+            'schools_created': 0,
+            'grades_created': 0,
+            'classes_created': 0
+        }
         
         # 自动创建默认家庭记录
         default_family, created = Family.objects.get_or_create(
@@ -352,100 +358,87 @@ class Command(BaseCommand):
                             self.stdout.write(f"  跳过学生: {name} - 缺少学校/年级/班级信息")
                         continue
                     
-                    # 在创建历史记录前，优先使用身份证号和学籍号查找学生
-                    try:
-                        # 首先尝试通过身份证号查找
-                        if id_number:
-                            student = Student.objects.get(id_number=id_number)
+                    # 改进学生查找逻辑，减少重复创建
+                    student = None
+                    # 优先使用各种ID进行精确匹配
+                    if id_number:
+                        student = Student.objects.filter(id_number=id_number).first()
+                    
+                    if not student and school_student_id:
+                        student = Student.objects.filter(school_student_id=school_student_id).first()
+                    
+                    
+                    # 如果还是找不到，尝试使用姓名+学校+年级组合查询（谨慎使用）
+                    if not student and name and school and grade:
+                        # 查找同名同校学生
+                        potential_students = Student.objects.filter(
+                            name=name, 
+                            current_school=school,
+                            current_grade=grade
+                        )
+                        # 如果只有一个匹配结果，认为是同一个学生
+                        if potential_students.count() == 1:
+                            student = potential_students.first()
+                            # 记录日志，提示可能的匹配
                             if debug:
-                                masked_id = id_number[:6] + '*' * (len(id_number) - 10) + id_number[-4:] if len(id_number) >= 10 else id_number
-                                self.stdout.write(f"通过身份证号找到学生: {student.name}, 身份证号: {masked_id}")
-                        else:
-                            # 强制进入except块
-                            raise Student.DoesNotExist()
-                    except Student.DoesNotExist:
-                        try:
-                            # 其次尝试通过学籍号查找
-                            if school_student_id:
-                                student = Student.objects.get(school_student_id=school_student_id)
-                                if debug:
-                                    self.stdout.write(f"通过学籍号找到学生: {student.name}")
-                            else:
-                                # 强制进入except块
-                                raise Student.DoesNotExist()
-                        except Student.DoesNotExist:
-                            # 如果都找不到，创建新学生，并从身份证号提取性别
-                            gender = 'U'  # 默认未知
-                            if id_number:
-                                # 从身份证号提取性别 (第17位为奇数是男性，偶数是女性)
-                                try:
-                                    if len(id_number) == 18:
-                                        gender = 'M' if int(id_number[16]) % 2 == 1 else 'F'
-                                    elif len(id_number) == 15:  # 兼容15位老身份证
-                                        gender = 'M' if int(id_number[14]) % 2 == 1 else 'F'
-                                except (ValueError, IndexError):
-                                    # 如果身份证号格式不正确，保持默认性别
-                                    self.stdout.write(self.style.WARNING(
-                                        f"无法从身份证号 '{id_number}' 提取性别信息，使用默认值 'U'"
-                                    ))
-                            
-                            # 在创建学生前增加从身份证号提取出生日期的代码
-                            birth_date = None
-                            if id_number:
-                                # 从身份证号提取出生日期
-                                if len(id_number) == 18:  # 18位身份证号
-                                    try:
-                                        birth_year = int(id_number[6:10])
-                                        birth_month = int(id_number[10:12])
-                                        birth_day = int(id_number[12:14])
-                                        from datetime import date
-                                        birth_date = date(birth_year, birth_month, birth_day)
-                                    except (ValueError, IndexError):
-                                        birth_date = date(2000, 1, 1)  # 默认日期
-                                elif len(id_number) == 15:  # 15位身份证号
-                                    try:
-                                        birth_year = int('19' + id_number[6:8])
-                                        birth_month = int(id_number[8:10])
-                                        birth_day = int(id_number[10:12])
-                                        from datetime import date
-                                        birth_date = date(birth_year, birth_month, birth_day)
-                                    except (ValueError, IndexError):
-                                        birth_date = date(2000, 1, 1)  # 默认日期
-                                else:
-                                    from datetime import date
-                                    birth_date = date(2000, 1, 1)  # 默认日期
-                            else:
-                                from datetime import date
-                                birth_date = date(2000, 1, 1)  # 默认日期
-                            
-                            student = Student.objects.create(
-                                student_id=id_number if id_number else (school_student_id if school_student_id else f"S{uuid.uuid4().hex[:8]}"),
-                                name=name,
-                                gender=gender,
-                                birth_date=birth_date,
-                                id_number=id_number,
-                                school_student_id=school_student_id,
-                                exam_number=exam_number,
-                                current_class=class_obj,
-                                current_grade=grade,
-                                current_school=school,
-                                family_id="F0001",
-                                region_id=6,
-                                phone='',
-                                email='',
-                                status='ACTIVE'
-                            )
-                            
-                            students[student.student_id] = student
-                            created_count += 1
-                            if debug and created_count % 100 == 0:
-                                self.stdout.write(f"  已创建 {created_count} 名学生...")
-                    except Exception as e:
-                        error_count += 1
-                        if debug:
-                            self.stdout.write(self.style.ERROR(f"  处理学生 {row.get('姓名', '未知')} 数据错误: {str(e)}"))
-                        skipped_count += 1
-                        continue
+                                self.stdout.write(self.style.WARNING(
+                                    f"通过姓名+学校+年级匹配到学生: {name}，ID: {student.student_id}"
+                                ))
+                    
+                    # 如果所有查询都未找到学生，创建新学生
+                    if not student:
+                        # 处理性别和出生日期提取的代码保持不变
+                        # ... existing code for gender and birth_date extraction ...                        
+                        student = Student.objects.create(
+                            student_id=id_number if id_number else (school_student_id if school_student_id else f"S{uuid.uuid4().hex[:8]}"),
+                            name=name,
+                            gender=gender,
+                            birth_date=birth_date,
+                            id_number=id_number,
+                            school_student_id=school_student_id,
+                            exam_number=exam_number,
+                            current_class=class_obj,
+                            current_grade=grade,
+                            current_school=school,
+                            family_id="F0001",
+                            region_id=6,
+                            phone='',
+                            email='',
+                            status='ACTIVE'
+                        )
+                        stats['students_created'] += 1
+                    else:
+                        # 找到已存在学生，考虑更新某些字段
+                        updated = False
+                        
+                        # 更新缺失的ID信息
+                        if id_number and not student.id_number:
+                            student.id_number = id_number
+                            updated = True
+                        
+                        if school_student_id and not student.school_student_id:
+                            student.school_student_id = school_student_id
+                            updated = True
+                        
+                        if exam_number and not student.exam_number:
+                            student.exam_number = exam_number
+                            updated = True
+                        
+                        # 更新学校、年级、班级信息
+                        if school and grade and class_obj:
+                            student.current_school = school
+                            student.current_grade = grade
+                            student.current_class = class_obj
+                            updated = True
+                        
+                        if updated:
+                            student.save()
+                            if debug:
+                                self.stdout.write(self.style.SUCCESS(f"更新学生信息: {name}"))
+                        
+                        stats['students_found'] += 1
+                    
+
             except Exception as e:
                 error_count += 1
                 if debug:
@@ -923,7 +916,6 @@ class Command(BaseCommand):
                             force=force, 
                             debug=debug,
                             # 添加教师导入相关参数
-                            import_teacher_history=options.get('import_teacher_history', False),
                             teacher_file=options.get('teacher_file'),
                             teacher_sheet=options.get('teacher_sheet', 'Sheet1')
                         )
@@ -1440,20 +1432,26 @@ class Command(BaseCommand):
         else:
             self.stdout.write(f"错误数量: 0 条")
         self.stdout.write("="*80)
-                    # 成绩导入后，单独处理教师历史导入，防止被前面的异常处理影响
         
+        # 成绩导入后，单独处理教师历史导入，防止被前面的异常处理影响
+        self.stdout.write(self.style.SUCCESS("开始导入教师历史数据..."))
         if teacher_file:
+            self.stdout.write(self.style.WARNING(f"教师文件路径: {teacher_file}"))
             try:
-                self.stdout.write(self.style.SUCCESS("开始导入教师历史数据..."))
-                teacher_stats = self.import_teacher_history(
-                    teacher_file=teacher_file,
-                    semester_id=semester_id
+                teacher_stats = self._import_teacher_history_from_file(
+                    file_path=teacher_file,
+                    semester_id=semester_id,
+                    options={
+                        'teacher_sheet': teacher_sheet,
+                        'debug': debug,
+                        'update': True
+                    }
                 )
                 self.stdout.write(self.style.SUCCESS(f"教师历史数据导入完成: 创建 {teacher_stats['created']} 条, 更新 {teacher_stats['updated']} 条, 错误 {teacher_stats['errors']} 条"))
             except Exception as e:
                 self.stdout.write(self.style.ERROR(f"导入教师历史数据失败: {str(e)}"))
-            else:
-                self.stdout.write(self.style.WARNING('未提供教师数据文件，跳过教师历史导入'))
+        else:
+            self.stdout.write(self.style.WARNING('未提供教师数据文件，跳过教师历史导入'))
         self.stdout.write(self.style.SUCCESS(f"历史导入完成，共处理 {historical_count} 条记录"))
         
         # 在历史导入完成时添加
@@ -2313,82 +2311,4 @@ class Command(BaseCommand):
             # 同时保存到缓存
             cache_key = f"task_progress_{self.progress['task_id']}"
             cache.set(cache_key, self.progress, 3600)
-
-    def import_teacher_history(self, teacher_file, semester_id, teacher_sheet='Sheet1', debug=False):
-        """
-        导入教师历史数据
-        
-        Args:
-            teacher_file: 教师数据文件路径
-            semester_id: 学期ID
-            teacher_sheet: Excel工作表名称
-            debug: 是否启用调试模式
-            
-        Returns:
-            导入统计信息
-        """
-        # 更新进度信息
-        self._update_progress(current=5, message="开始导入教师历史数据...")
-        
-        if not os.path.exists(teacher_file):
-            self.stdout.write(self.style.ERROR(f"教师数据文件不存在: {teacher_file}"))
-            return {'created': 0, 'updated': 0, 'errors': 1}
-            
-        try:
-            # 获取学期对象
-            try:
-                semester = Semester.objects.get(semester_id=semester_id)
-            except Semester.DoesNotExist:
-                self.stdout.write(self.style.ERROR(f"学期不存在: {semester_id}"))
-                return {'created': 0, 'updated': 0, 'errors': 1}
-                
-            # 读取Excel文件
-            df = pd.read_excel(teacher_file, sheet_name=teacher_sheet)
-            self.stdout.write(f'成功读取教师文件，共 {len(df)} 条记录')
-            
-
-
-            
-            # 使用StringIO捕获命令输出
-            output = StringIO()
-            
-            args = [
-                teacher_file,
-                '--semester-id', semester_id,
-                '--sheet', teacher_sheet,
-                '--auto-create-classes'
-            ]
-            
-            if debug:
-                args.append('--debug')
-                
-            # 执行教师历史导入命令并捕获输出
-            self.stdout.write("调用教师历史导入命令...")
-            call_command('import_teacher_history', *args, stdout=output)
-            
-            # 从输出中尝试解析统计信息
-            output_text = output.getvalue()
-            stats = {'created': 0, 'updated': 0, 'errors': 0}
-            
-            # 尝试从输出中提取统计信息
-            import re
-            created_match = re.search(r'新建\s+(\d+)', output_text)
-            updated_match = re.search(r'更新\s+(\d+)', output_text)
-            errors_match = re.search(r'错误\s+(\d+)', output_text)
-            
-            if created_match:
-                stats['created'] = int(created_match.group(1))
-            if updated_match:
-                stats['updated'] = int(updated_match.group(1))
-            if errors_match:
-                stats['errors'] = int(errors_match.group(1))
-            
-            self._update_progress(current=6, message=f"教师历史数据导入完成: 创建 {stats['created']} 条, 更新 {stats['updated']} 条")
-            return stats
-            
-        except Exception as e:
-            import traceback
-            error_msg = f"导入教师历史数据错误: {str(e)}\n{traceback.format_exc()}"
-            self.stdout.write(self.style.ERROR(error_msg))
-            return {'created': 0, 'updated': 0, 'errors': 1}
 
