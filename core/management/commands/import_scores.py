@@ -5,18 +5,15 @@
 支持同时导入学校、年级、班级、学生和成绩数据，实现一站式数据导入。
 """
 
-import pandas as pd
 import numpy as np
 from datetime import datetime, date, time, timedelta
 import os
-import re
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
-from core.models import Student, Subject, Exam, Score, School, Grade, Class, Teacher, Semester, TeacherSubject, Region, Family, StudentHistory, TeacherHistory
+from core.models import Student, Subject, Exam, Score, School, Grade, Class, Teacher, Semester, Region, Family, StudentHistory, TeacherHistory
 import uuid
 import hashlib
 # 导入所需模块
-from core.models import Score, Student, School, StudentHistory, Exam, Subject, Grade, Class, Semester
 from datetime import datetime, timedelta
 import pandas as pd
 from scipy import stats as scipy_stats
@@ -303,7 +300,10 @@ class Command(BaseCommand):
             'errors': 0,
             'schools_created': 0,
             'grades_created': 0,
-            'classes_created': 0
+            'classes_created': 0,
+            'skipped_count'  : 0
+
+
         }
         
         # 自动创建默认家庭记录
@@ -353,7 +353,7 @@ class Command(BaseCommand):
                     class_obj = classes.get((school_id, grade_level, class_name))
                     
                     if not school or not grade or not class_obj:
-                        skipped_count += 1
+                        stats['skipped_count'] += 1
                         if debug:
                             self.stdout.write(f"  跳过学生: {name} - 缺少学校/年级/班级信息")
                         continue
@@ -440,15 +440,15 @@ class Command(BaseCommand):
                     
 
             except Exception as e:
-                error_count += 1
+                stats['skipped_count'] += 1
                 if debug:
                     self.stdout.write(self.style.ERROR(f"  处理学生 {row.get('姓名', '未知')} 数据错误: {str(e)}"))
-                skipped_count += 1
+                    stats['errors'] += 1
                 continue
         
         self.stdout.write(self.style.SUCCESS(
-            f"  完成学生导入: 新建 {created_count} 名学生, 更新 {updated_count} 名学生, "
-            f"跳过 {skipped_count} 名学生, 错误 {error_count} 条记录"
+            f"  完成学生导入: 新建 {stats['students_created']} 名学生, 更新 {stats['students_found']} 名学生, "
+            f"跳过 {stats['skipped_count']} 名学生, 错误 {stats['errors']} 条记录"
         ))
         return students
 
@@ -915,9 +915,11 @@ class Command(BaseCommand):
                             update_students=update_students, 
                             force=force, 
                             debug=debug,
-                            # 添加教师导入相关参数
+                            # 明确传递教师相关参数
+                            import_teacher_history=options.get('import_teacher_history'),
                             teacher_file=options.get('teacher_file'),
-                            teacher_sheet=options.get('teacher_sheet', 'Sheet1')
+                            teacher_sheet=options.get('teacher_sheet', 'Sheet1'),
+                            auto_create_missing_teachers=options.get('auto_create_missing_teachers')
                         )
                 
             except Exception as e:
@@ -994,7 +996,7 @@ class Command(BaseCommand):
             'scores_updated': scores_updated
         }
 
-    def _historical_import(self, df, semester_id, exam_id, exam_name, exam_type, teacher_id, skip_teacher, region_id, create_students, update_students, force=False, debug=False, import_teacher_history=False, teacher_file=None, teacher_sheet=None):
+    def _historical_import(self, df, semester_id, exam_id, exam_name, exam_type, teacher_id, skip_teacher, region_id, create_students, update_students, force=False, debug=False, import_teacher_history=False, teacher_file=None, teacher_sheet=None, auto_create_missing_teachers=False):
         """历史数据导入逻辑，用于非活跃学期"""
         self.stdout.write("使用历史记录导入模式...")
         
@@ -1090,7 +1092,7 @@ class Command(BaseCommand):
                 
                 # 创建一个简短但唯一的grade_id
                 semester_short = semester_id.replace("-", "")[-3:]  # 例如 "2022-2023-1" 变为 "231"
-                grade_id = f"G{school_id[:3]}_{grade_level}_{semester_short}"
+                grade_id = f"G{school_id[-2:]}_{grade_level}_{semester_short}"  # 使用学校代码最后两位
                 if len(grade_id) > 10:
                     grade_id = grade_id[:10]  # 截断以符合长度限制
                 
@@ -1137,7 +1139,7 @@ class Command(BaseCommand):
                 
                 # 创建一个简短但唯一的class_id
                 semester_short = semester_id.replace("-", "")[-3:]
-                class_id = f"C{school_id[:2]}_{grade_level}{class_name}_{semester_short}"
+                class_id = f"C{school_id[-2:]}_{grade_level}{class_name}_{semester_short}"  # 使用学校代码最后两位
                 if len(class_id) > 10:
                     class_id = class_id[:10]  # 截断以符合长度限制
                 
@@ -1438,7 +1440,8 @@ class Command(BaseCommand):
         if teacher_file:
             self.stdout.write(self.style.WARNING(f"教师文件路径: {teacher_file}"))
             try:
-                teacher_stats = self._import_teacher_history_from_file(
+                # 调用教师历史导入函数
+                result = self._import_teacher_history_from_file(
                     file_path=teacher_file,
                     semester_id=semester_id,
                     options={
@@ -1447,7 +1450,17 @@ class Command(BaseCommand):
                         'update': True
                     }
                 )
-                self.stdout.write(self.style.SUCCESS(f"教师历史数据导入完成: 创建 {teacher_stats['created']} 条, 更新 {teacher_stats['updated']} 条, 错误 {teacher_stats['errors']} 条"))
+
+                # 安全处理返回值
+                if result is None:
+                    result = {'created': 0, 'updated': 0, 'errors': 0}
+
+                # 使用get方法安全获取结果
+                created = result.get('created', 0)
+                updated = result.get('updated', 0) 
+                errors = result.get('errors', 0)
+
+                self.stdout.write(f"教师历史导入汇总: 创建={created}, 更新={updated}, 错误={errors}")
             except Exception as e:
                 self.stdout.write(self.style.ERROR(f"导入教师历史数据失败: {str(e)}"))
         else:
@@ -1549,6 +1562,11 @@ class Command(BaseCommand):
             # 特殊处理科任列名
             key_with_suffix = f"{key}科任"
             subject_map[key_with_suffix] = subject.subject_id
+        
+        # 添加政治学科的别名映射
+        subject_map['政治'] = ('MOR', '道德与法治')
+        subject_map['政治科任'] = ('MOR', '道德与法治')  # 添加这一行
+        subject_map['道法'] = ('MOR', '道德与法治')
         
         return subject_map
 
@@ -1780,7 +1798,7 @@ class Command(BaseCommand):
             f"从成绩数据提取并导入教师历史记录完成: 新建 {created_count}, 更新 {updated_count}, 错误 {error_count}"
         ))
 
-    def _import_teacher_history_from_file(self, file_path, semester_id, options):
+    def _import_teacher_history_from_file(self, file_path, semester_id, options=None):
         """从指定文件导入教师历史记录"""
         self.stdout.write(f"开始从文件 {file_path} 导入教师历史记录...")
         
@@ -1789,18 +1807,35 @@ class Command(BaseCommand):
         update = options.get('update', False)
         
         try:
+            # 确保文件存在
+            if not os.path.exists(file_path):
+                self.stdout.write(self.style.ERROR(f"教师文件不存在: {file_path}"))
+                return {'created': 0, 'updated': 0, 'errors': 1}
+            
             # 读取Excel文件
-            df = pd.read_excel(file_path, sheet_name=options.get('teacher_sheet', 'Sheet1'))
-            self.stdout.write(f'成功读取教师文件，共 {len(df)} 条记录')
+            try:
+                sheet_name = options.get('teacher_sheet', 'Sheet1')
+                df = pd.read_excel(file_path, sheet_name=sheet_name)
+                self.stdout.write(f'成功读取教师文件，共 {len(df)} 条记录')
+            except Exception as e:
+                self.stdout.write(self.style.ERROR(f"读取Excel文件失败: {str(e)}"))
+                return {'created': 0, 'updated': 0, 'errors': 1}
             
-            # 获取学科映射
-            subject_map = self._get_subject_id_map(debug)
+            # 获取学科映射前确保它不为None
+            subject_map = self._get_subject_id_map(debug) or {}
             
-            # 验证数据
+            # 验证数据时确保column_map被设置
             valid, subject_columns = self._validate_teacher_data(df)
+            if not hasattr(self, 'column_map') or not self.column_map:
+                self.stdout.write(self.style.ERROR("列映射未正确初始化"))
+                return {'created': 0, 'updated': 0, 'errors': 1}
             
             # 获取学期对象
-            semester = Semester.objects.get(semester_id=semester_id)
+            try:
+                semester = Semester.objects.get(semester_id=semester_id)
+            except Semester.DoesNotExist:
+                self.stdout.write(self.style.ERROR(f"学期不存在: {semester_id}"))
+                return {'created': 0, 'updated': 0, 'errors': 1}
             
             # 处理每行数据
             created_count = updated_count = error_count = 0
@@ -1818,6 +1853,13 @@ class Command(BaseCommand):
             
         except Exception as e:
             self.stdout.write(self.style.ERROR(f"导入教师历史记录失败: {str(e)}"))
+        
+        # 确保函数末尾有明确的返回值
+        return {
+            'created': created_count,
+            'updated': updated_count, 
+            'errors': error_count
+        }
 
 
     def _get_subject_mappings(self):
@@ -1937,287 +1979,296 @@ class Command(BaseCommand):
         return True, subject_columns
 
     def _process_teacher_row(self, row, subject_columns, subject_map, semester, debug=False, update_existing=False):
-        """
-        处理单行教师数据，为每个学科教师创建历史记录。
+        created_count = updated_count = error_count = 0
         
-        Args:
-            row: Series对象，包含一行数据
-            subject_columns: 学科教师列名列表
-            subject_map: 学科名称到学科ID的映射
-            semester: 学期对象
-            debug: 是否启用调试模式
-            update_existing: 是否更新现有记录
-            
-        Returns:
-            tuple: (创建数, 更新数, 错误数)
-        
-        Raises:
-            None
-        """
-        created_count = 0
-        updated_count = 0
-        error_count = 0
-        
+        # 为每行使用独立事务
         try:
-            # 使用validate_data中识别的列名获取基本数据
-            school_id = str(row[self.column_map['学校代码']]).strip()
-            grade_level = str(row[self.column_map['年级']]).strip()
-            class_name = str(row[self.column_map['班别']]).strip()
-            
-            # 输出调试信息
-            if debug:
-                self.stdout.write(f"处理行: 学校={school_id}, 年级={grade_level}, 班级={class_name}")
-            
-            # 查找学校
-            try:
-                school = School.objects.get(school_id=school_id)
-            except School.DoesNotExist:
+            with transaction.atomic():
+                # 使用validate_data中识别的列名获取基本数据
+                school_id = str(row[self.column_map['学校代码']]).strip()
+                grade_level = str(row[self.column_map['年级']]).strip()
+                class_name = str(row[self.column_map['班别']]).strip()
+                
+                # 输出调试信息
                 if debug:
-                    self.stdout.write(self.style.ERROR(f"学校不存在: {school_id}"))
-                return 0, 0, 1
-            
-            # 生成与导入分数时相同格式的班级ID和年级ID
-            semester_id = semester.semester_id
-            semester_short = semester_id.replace("-", "")[-3:]  # 例如 "2022-2023-1" 变为 "231"
-            
-            # 按照import_scores.py的格式构造ID
-            grade_id = f"G{school_id[:3]}_{grade_level}_{semester_short}"
-            class_id = f"C{school_id[:2]}_{grade_level}{class_name}_{semester_short}"
-            
-            # 还保留旧格式ID以增加匹配可能性
-            old_class_id = f"{school_id}_{grade_level}_{class_name}"
-            
-            # 查找班级 - 多种匹配方式
-            class_obj = None
-            grade = None
-            
-            # 1. 先尝试使用新格式ID查找
-            try:
-                class_obj = Class.objects.get(class_id=class_id)
-                grade = class_obj.grade
-                if debug:
-                    self.stdout.write(f"通过新格式班级ID找到班级: {class_id}")
-            except Class.DoesNotExist:
-                # 2. 尝试使用旧格式ID查找
+                    self.stdout.write(f"处理行: 学校={school_id}, 年级={grade_level}, 班级={class_name}")
+                
+                # 查找学校
                 try:
-                    class_obj = Class.objects.get(class_id=old_class_id)
+                    school = School.objects.get(school_id=school_id)
+                except School.DoesNotExist:
+                    if debug:
+                        self.stdout.write(self.style.ERROR(f"学校不存在: {school_id}"))
+                    return 0, 0, 1
+                
+                # 生成与导入分数时相同格式的班级ID和年级ID
+                semester_id = semester.semester_id
+                semester_short = semester_id.replace("-", "")[-3:]  # 例如 "2022-2023-1" 变为 "231"
+                
+                # 修改年级ID和班级ID生成逻辑，均使用学校代码的最后两位
+                grade_id = f"G{school_id[-2:]}_{grade_level}_{semester_short}"  # 使用学校代码最后两位
+                class_id = f"C{school_id[-2:]}_{grade_level}{class_name}_{semester_short}"  # 使用学校代码最后两位
+                
+                # 还保留旧格式ID以增加匹配可能性
+                old_class_id = f"{school_id}_{grade_level}_{class_name}"
+                
+                # 查找班级 - 多种匹配方式
+                class_obj = None
+                grade = None
+                
+                # 1. 先尝试使用新格式ID查找
+                try:
+                    class_obj = Class.objects.get(class_id=class_id)
                     grade = class_obj.grade
                     if debug:
-                        self.stdout.write(f"通过旧格式班级ID找到班级: {old_class_id}")
+                        self.stdout.write(f"通过新格式班级ID找到班级: {class_id}")
                 except Class.DoesNotExist:
-                    # 3. 尝试从学校和班级名称查找
-                    class_obj = Class.objects.filter(
-                        grade__school__school_id=school_id,
-                        class_name=class_name
-                    ).first()
-                    
-                    if class_obj:
+                    # 2. 尝试使用旧格式ID查找
+                    try:
+                        class_obj = Class.objects.get(class_id=old_class_id)
                         grade = class_obj.grade
                         if debug:
-                            self.stdout.write(f"通过学校和班级名称找到班级: {class_obj.class_id}")
-                    else:
-                        # 4. 通过学生历史记录查找班级
-                        student_history = StudentHistory.objects.filter(
-                            school__school_id=school_id,
-                            semester=semester,
-                            grade__grade_name=grade_level
+                            self.stdout.write(f"通过旧格式班级ID找到班级: {old_class_id}")
+                    except Class.DoesNotExist:
+                        # 3. 尝试从学校和班级名称查找
+                        class_obj = Class.objects.filter(
+                            grade__school__school_id=school_id,
+                            class_name=class_name
                         ).first()
                         
-                        if student_history and student_history.class_field:
-                            class_obj = student_history.class_field
-                            grade = student_history.grade
+                        if class_obj:
+                            grade = class_obj.grade
                             if debug:
-                                self.stdout.write(f"通过学生历史记录找到班级: {class_obj.class_id}")
+                                self.stdout.write(f"通过学校和班级名称找到班级: {class_obj.class_id}")
                         else:
-                            # 5. 尝试查找年级以便创建班级
-                            try:
-                                # 先用新格式ID查找年级
-                                grade_obj = Grade.objects.get(grade_id=grade_id)
-                            except Grade.DoesNotExist:
-                                # 再尝试通过学校和年级名称查找
-                                grade_obj = Grade.objects.filter(
-                                    school__school_id=school_id,
-                                    grade_name=f"{grade_level}年级"
-                                ).first()
+                            # 4. 通过学生历史记录查找班级
+                            student_history = StudentHistory.objects.filter(
+                                school__school_id=school_id,
+                                semester=semester,
+                                grade__grade_name=grade_level
+                            ).first()
                             
-                            if grade_obj:
+                            if student_history and student_history.class_field:
+                                class_obj = student_history.class_field
+                                grade = student_history.grade
                                 if debug:
-                                    self.stdout.write(f"找到年级但未找到班级: {grade_level}")
-                                if hasattr(self, 'options') and self.options.get('auto_create_missing_teachers'):
-                                    # 创建新班级，使用与导入分数相同的ID格式
-                                    class_obj = Class.objects.create(
-                                        class_id=class_id,
-                                        class_name=f"{grade_level}年级{class_name}班",
-                                        grade=grade_obj,
-                                        status='ACTIVE'
-                                    )
-                                    grade = grade_obj
+                                    self.stdout.write(f"通过学生历史记录找到班级: {class_obj.class_id}")
+                            else:
+                                # 5. 尝试查找年级以便创建班级
+                                try:
+                                    # 先用新格式ID查找年级
+                                    grade_obj = Grade.objects.get(grade_id=grade_id)
+                                except Grade.DoesNotExist:
+                                    # 再尝试通过学校和年级名称查找
+                                    grade_obj = Grade.objects.filter(
+                                        school__school_id=school_id,
+                                        grade_name=f"{grade_level}年级"
+                                    ).first()
+                                
+                                if grade_obj:
                                     if debug:
-                                        self.stdout.write(self.style.SUCCESS(f"自动创建班级: {class_id}"))
+                                        self.stdout.write(f"找到年级但未找到班级: {grade_level}")
+                                    if hasattr(self, 'options') and self.options.get('auto_create_missing_teachers'):
+                                        # 创建新班级，使用与导入分数相同的ID格式
+                                        class_obj = Class.objects.create(
+                                            class_id=class_id,
+                                            class_name=f"{grade_level}年级{class_name}班",
+                                            grade=grade_obj,
+                                            status='ACTIVE'
+                                        )
+                                        grade = grade_obj
+                                        if debug:
+                                            self.stdout.write(self.style.SUCCESS(f"自动创建班级: {class_id}"))
+                                    else:
+                                        if debug:
+                                            self.stdout.write(self.style.ERROR(f"找不到班级且未启用自动创建: {class_name}"))
+                                        return 0, 0, 1
                                 else:
                                     if debug:
-                                        self.stdout.write(self.style.ERROR(f"找不到班级且未启用自动创建: {class_name}"))
+                                        self.stdout.write(self.style.ERROR(f"找不到年级: {grade_level} (学校: {school_id})"))
                                     return 0, 0, 1
-                            else:
-                                if debug:
-                                    self.stdout.write(self.style.ERROR(f"找不到年级: {grade_level} (学校: {school_id})"))
-                                return 0, 0, 1
 
-            if not class_obj:
-                if debug:
-                    self.stdout.write(self.style.ERROR(f"无法找到班级: {class_name} (年级: {grade_level}, 学校: {school_id})"))
-                return 0, 0, 1
-            
-            # 处理每个学科教师
-            for subject_col in subject_columns:
-                if pd.isna(row[subject_col]):
-                    continue
-                
-                teacher_name = str(row[subject_col]).strip()
-                if not teacher_name:
-                    continue
-                
-                if debug:
-                    self.stdout.write(f"处理学科: {subject_col}, 教师: {teacher_name}")
-                
-                # 获取学科ID
-                subject_id = None
-                
-                # 1. 直接从映射中查找完整的列名
-                if subject_col in subject_map:
-                    subject_id = subject_map[subject_col]
-                else:
-                    # 2. 尝试从映射中查找部分匹配
-                    for key, value in subject_map.items():
-                        if key in subject_col or subject_col in key:
-                            subject_id = value
-                            break
-                
-                if not subject_id:
+                if not class_obj:
                     if debug:
-                        self.stdout.write(self.style.ERROR(f"无法识别学科: {subject_col}"))
-                    error_count += 1
-                    continue
+                        self.stdout.write(self.style.ERROR(f"无法找到班级: {class_name} (年级: {grade_level}, 学校: {school_id})"))
+                    return 0, 0, 1
                 
-                # 查找学科
-                try:
-                    subject = Subject.objects.get(subject_id=subject_id)
-                except Subject.DoesNotExist:
+                # 处理每个学科教师
+                for subject_col in subject_columns:
+                    if pd.isna(row[subject_col]):
+                        continue
+                    
+                    teacher_name = str(row[subject_col]).strip()
+                    if not teacher_name:
+                        continue
+                    
                     if debug:
-                        self.stdout.write(self.style.ERROR(f"学科不存在: {subject_id}"))
-                    error_count += 1
-                    continue
-                
-                # 根据教师姓名查找教师记录 - 更灵活的匹配方式
-                try:
-                    # 1. 精确匹配当前学校教师
-                    teacher = Teacher.objects.filter(
-                        name=teacher_name,
-                        current_school__school_id=school_id
-                    ).first()
+                        self.stdout.write(f"处理学科: {subject_col}, 教师: {teacher_name}")
                     
-                    # 2. 如果未找到，尝试在所有教师中查找
-                    if not teacher:
-                        teacher = Teacher.objects.filter(name=teacher_name).first()
+                    # 获取学科ID
+                    subject_id = None
                     
-                    # 3. 如果仍未找到，尝试模糊匹配
-                    if not teacher and len(teacher_name) > 1:
+                    # 特殊处理政治学科
+                    if '政治' in subject_col:
+                        subject_id = 'MOR'  # 道德与法治的学科ID
+                    elif subject_col in subject_map:
+                        subject_id = subject_map[subject_col]
+                    else:
+                        # 尝试从映射中查找部分匹配
+                        for key, value in subject_map.items():
+                            if key in subject_col or subject_col in key:
+                                subject_id = value
+                                break
+                    
+                    if not subject_id:
                         if debug:
-                            self.stdout.write(f"尝试模糊匹配教师: {teacher_name}")
-                        # 使用包含查询
-                        possible_teachers = Teacher.objects.filter(
-                            name__contains=teacher_name[:2],
-                            current_school__school_id=school_id
-                        )
-                        if possible_teachers.exists():
-                            if debug:
-                                self.stdout.write(f"找到可能匹配的教师: {[t.name for t in possible_teachers]}")
-                            teacher = possible_teachers.first()
-                    
-                    # 4. 如果启用了自动创建教师选项，创建不存在的教师
-                    if not teacher and hasattr(self, 'options') and self.options.get('auto_create_missing_teachers'):
-                        # 创建新教师
-                        import uuid
-                        teacher_id = f"T{uuid.uuid4().hex[:8]}"  # 生成唯一ID
-                        teacher = Teacher.objects.create(
-                            teacher_id=teacher_id,
-                            name=teacher_name,
-                            gender='U',  # 默认性别为未知
-                            current_school=school,
-                            status='ACTIVE'
-                        )
-                        if debug:
-                            self.stdout.write(self.style.SUCCESS(f"自动创建教师: {teacher_name} (ID: {teacher_id})"))
-                    
-                    if not teacher:
-                        if debug:
-                            self.stdout.write(self.style.ERROR(f"教师不存在: {teacher_name} (在学校 {school_id})"))
+                            self.stdout.write(self.style.ERROR(f"无法识别学科: {subject_col}"))
                         error_count += 1
                         continue
-                        
-                except Exception as e:
-                    if debug:
-                        self.stdout.write(self.style.ERROR(f"查找教师错误: {str(e)}"))
-                    error_count += 1
-                    continue
-                
-                # 判断教师是否班主任（通常一个班级只有一个班主任）
-                is_class_teacher = False
-                admin_position = ''
-                
-                # 判断班主任
-                if "班主任" in subject_col or subject_col == "班主任":
-                    is_class_teacher = True
-                    admin_position = '班主任'
-                
-                # 创建或更新TeacherHistory记录
-                try:
-                    # 检查是否已存在相同记录
-                    exists = TeacherHistory.objects.filter(
-                        teacher=teacher,
-                        school=school,
-                        semester=semester,
-                        subject=subject,
-                        class_field=class_obj
-                    ).exists()
                     
-                    if exists and not update_existing:
-                        # 如果记录已存在且不更新，跳过
+                    # 查找学科
+                    try:
+                        subject = Subject.objects.get(subject_id=subject_id)
+                    except Subject.DoesNotExist:
                         if debug:
-                            self.stdout.write(f"跳过已存在的记录: {teacher.name} - {subject.subject_name} - {class_obj.class_name}")
+                            self.stdout.write(self.style.ERROR(f"学科不存在: {subject_id}"))
+                        error_count += 1
                         continue
                     
-                    # 创建或更新历史记录
-                    history, created = TeacherHistory.objects.update_or_create(
-                        teacher=teacher,
-                        school=school,
-                        semester=semester,
-                        subject=subject,
-                        class_field=class_obj,
-                        defaults={
-                            'grade': grade,
-                            'is_class_teacher': is_class_teacher,
-                            'admin_position': admin_position,
-                            'start_date': semester.start_date,
-                            'end_date': semester.end_date,
-                            'status': 'COMPLETED'
-                        }
-                    )
-                    
-                    if created:
-                        created_count += 1
-                        if debug:
-                            self.stdout.write(self.style.SUCCESS(f"创建教师历史记录: {teacher.name} - {subject.subject_name} - {class_obj.class_name}"))
-                    else:
-                        updated_count += 1
-                        if debug:
-                            self.stdout.write(f"更新教师历史记录: {teacher.name} - {subject.subject_name} - {class_obj.class_name}")
+                    # 根据教师姓名查找教师记录 - 更灵活的匹配方式
+                    try:
+                        # 1. 精确匹配当前学校教师
+                        teacher = Teacher.objects.filter(
+                            name=teacher_name,
+                            current_school__school_id=school_id
+                        ).first()
                         
-                except Exception as e:
-                    if debug:
-                        self.stdout.write(self.style.ERROR(f"创建历史记录错误: {str(e)}"))
-                    error_count += 1
+                        # 2. 如果未找到，尝试通过姓名和学科查找
+                        if not teacher:
+                            teacher = Teacher.objects.filter(
+                                name=teacher_name,
+                                main_subject=subject.subject_name
+                            ).first()
+                        
+                        # 3. 如果仍未找到，尝试模糊匹配
+                        if not teacher and len(teacher_name) > 1:
+                            if debug:
+                                self.stdout.write(f"尝试模糊匹配教师: {teacher_name}")
+                            # 在模糊匹配前添加调试代码
+                            if debug:
+                                self.stdout.write(f"尝试模糊匹配教师: {teacher_name} (长度: {len(teacher_name)})")
+                                self.stdout.write(f"学校ID: {school_id} (长度: {len(school_id)})")
+                            
+                            # 确保名称不超过限制长度
+                            safe_teacher_name = teacher_name[:20] if len(teacher_name) > 20 else teacher_name
+                            
+                            # 修改模糊匹配查询
+                            try:
+                                possible_teachers = Teacher.objects.filter(
+                                    name__contains=safe_teacher_name[:2],
+                                    current_school__school_id=school_id
+                                )
+                                if possible_teachers.exists():
+                                    teacher = possible_teachers.first()
+                            except Exception as e:
+                                if debug:
+                                    self.stdout.write(self.style.ERROR(f"模糊匹配查询错误: {str(e)}"))
+                                # 避免中断整个处理流程，继续创建新教师
+                                possible_teachers = []
+                        
+                        # 4. 直接创建不存在的教师（不需要选项控制）
+                        if not teacher:
+                            # 创建新教师
+                            import uuid
+                            from datetime import date
+                            teacher_id = f"T{uuid.uuid4().hex[:8]}"  # 生成唯一ID
+                            
+                            # 在创建新教师前确保所有字段长度安全
+                            if not teacher:
+                                # 确保各字段长度安全
+                                safe_teacher_name = teacher_name[:20] if len(teacher_name) > 20 else teacher_name
+                                
+                                try:
+                                    teacher = Teacher.objects.create(
+                                        teacher_id=teacher_id,
+                                        name=safe_teacher_name,
+                                        gender='U',
+                                        birth_date=date(1980, 1, 1),
+                                        current_school=school,
+                                        main_subject=subject.subject_name,  # 使用学科ID而不是完整名称
+                                        title='',  # 设置安全的空值
+                                        admin_position='',  # 设置安全的空值
+                                        status='ACTIVE'
+                                    )
+                                except Exception as e:
+                                    
+                                    self.stdout.write(self.style.ERROR(f"自动创建教师错误: {str(e)}"))
+                                if debug:
+                                    self.stdout.write(self.style.ERROR(f"自动创建教师: {teacher_name} (ID: {teacher_id})"))
+                            
+                    except Exception as e:
+                        if debug:
+                            self.stdout.write(self.style.ERROR(f"查找教师错误: {str(e)}"))
+                        error_count += 1
+                        continue
                     
+                    # 判断教师是否班主任（通常一个班级只有一个班主任）
+                    is_class_teacher = False
+                    admin_position = ''
+                    
+                    # 判断班主任
+                    if "班主任" in subject_col or subject_col == "班主任":
+                        is_class_teacher = True
+                        admin_position = '班主任'
+                    
+                    # 创建或更新TeacherHistory记录
+                    try:
+                        # 检查是否已存在相同记录
+                        exists = TeacherHistory.objects.filter(
+                            teacher=teacher,
+                            school=school,
+                            semester=semester,
+                            subject=subject,
+                            class_field=class_obj
+                        ).exists()
+                        
+                        if exists and not update_existing:
+                            # 如果记录已存在且不更新，跳过
+                            if debug:
+                                self.stdout.write(f"跳过已存在的记录: {teacher.name} - {subject.subject_name} - {class_obj.class_name}")
+                            continue
+                        
+                        # 创建或更新历史记录
+                        history, created = TeacherHistory.objects.update_or_create(
+                            teacher=teacher,
+                            school=school,
+                            semester=semester,
+                            subject=subject,
+                            class_field=class_obj,
+                            defaults={
+                                'grade': grade,
+                                'is_class_teacher': is_class_teacher,
+                                'admin_position': admin_position,
+                                'start_date': semester.start_date,
+                                'end_date': semester.end_date,
+                                'status': 'COMPLETED'
+                            }
+                        )
+                        
+                        if created:
+                            created_count += 1
+                            if debug:
+                                self.stdout.write(self.style.SUCCESS(f"创建教师历史记录: {teacher.name} - {subject.subject_name} - {class_obj.class_name}"))
+                        else:
+                            updated_count += 1
+                            if debug:
+                                self.stdout.write(f"更新教师历史记录: {teacher.name} - {subject.subject_name} - {class_obj.class_name}")
+                            
+                    except Exception as e:
+                        if debug:
+                            self.stdout.write(self.style.ERROR(f"创建历史记录错误: {str(e)}"))
+                        error_count += 1
+                        
         except Exception as e:
             if debug:
                 self.stdout.write(self.style.ERROR(f"处理行数据错误: {str(e)}"))

@@ -195,7 +195,7 @@ class Teacher(models.Model):
     graduate_school = models.CharField(max_length=100, blank=True, null=True)
     major = models.CharField(max_length=50, blank=True, null=True)
     cert_number = models.CharField(max_length=20, blank=True, null=True)
-    title = models.CharField(max_length=20, blank=True, null=True)
+    title = models.CharField(max_length=100, blank=True, null=True)
     current_school = models.ForeignKey(School, on_delete=models.CASCADE)
     qualification = models.CharField(max_length=10, choices=[
         ('JUNIOR', '初级'), 
@@ -204,10 +204,10 @@ class Teacher(models.Model):
     ])
     teaching_years = models.IntegerField(default=0)
     entry_date = models.DateField(blank=True, null=True)
-    main_subject = models.CharField(max_length=20, blank=True, null=True)
-    secondary_subject = models.CharField(max_length=20, blank=True, null=True)
+    main_subject = models.CharField(max_length=50, blank=True, null=True)
+    secondary_subject = models.CharField(max_length=50, blank=True, null=True)
     is_class_teacher = models.BooleanField(default=False)
-    admin_position = models.CharField(max_length=50, blank=True, null=True)
+    admin_position = models.CharField(max_length=100, blank=True, null=True)
     status = models.CharField(max_length=10, default='ACTIVE')
     classes = models.ManyToManyField(Class, related_name='teachers', blank=True)
 
@@ -712,4 +712,5 @@ class TeacherHistory(models.Model):
         unique_together = [['teacher', 'school', 'semester', 'subject', 'class_field']]
         
     def __str__(self):
-        return f"{self.teacher.name} - {self.school.school_name} - {self.semester.semester_name} - {self.subject.subject_name}" 
+        semester_display = self.semester.semester_id.replace('-', '学年第') + '学期'
+        return f"{self.teacher.name} - {self.school.school_name} - {semester_display} - {self.subject.subject_name}" 
