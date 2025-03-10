@@ -70,6 +70,16 @@ def run_import_task_sync(file_path, exam_id, exam_name, exam_type, semester_id,
         if force:
             kwargs['force'] = True
             
+        # 添加教师历史相关参数
+        if import_teacher_history:
+            kwargs['import_teacher_history'] = True
+        if teacher_file:
+            kwargs['teacher_file'] = teacher_file
+        if teacher_sheet:
+            kwargs['teacher_sheet'] = teacher_sheet
+        if auto_create_missing_teachers:
+            kwargs['auto_create_missing_teachers'] = True
+            
         # 执行命令
         call_command('import_scores', **kwargs)
         return {'success': True, 'task_id': task_id}
@@ -392,15 +402,22 @@ class ImportDataAdmin(admin.ModelAdmin):
                         teacher_sheet = 'Sheet1'
                         
                         if isinstance(form, ScoresImportForm):
-                            import_teacher_history = form.cleaned_data.get('import_teacher_history', False)
-                            auto_create_missing_teachers = form.cleaned_data.get('auto_create_missing_teachers', False)
-                            
-                            if 'teacher_file' in request.FILES and import_teacher_history:
+                            # 检查是否上传了教师文件
+                            if 'teacher_file' in request.FILES:
+                                # 如果上传了教师文件，自动启用教师历史导入和自动创建教师功能
                                 teacher_file = request.FILES['teacher_file']
                                 teacher_file_name = fs.save(teacher_file.name, teacher_file)
                                 teacher_file_path = os.path.join(settings.MEDIA_ROOT, teacher_file_name)
                                 teacher_sheet = form.cleaned_data.get('teacher_sheet', 'Sheet1')
                                 
+                                # 自动设置为True，无论用户是否勾选了相应选项
+                                import_teacher_history = True
+                                auto_create_missing_teachers = True
+                            else:
+                                # 如果没有上传教师文件，则使用表单中的选项
+                                import_teacher_history = form.cleaned_data.get('import_teacher_history', False)
+                                auto_create_missing_teachers = form.cleaned_data.get('auto_create_missing_teachers', False)
+                        
                         # 创建任务ID
                         task_id = str(uuid.uuid4())
                         
@@ -482,6 +499,15 @@ class ImportDataAdmin(admin.ModelAdmin):
         if isinstance(form, ScoresImportForm):
             # 成绩导入参数
             
+            # 确定是否启用教师历史导入和自动创建教师
+            import_teacher_history = form.cleaned_data.get('import_teacher_history', False)
+            auto_create_missing_teachers = form.cleaned_data.get('auto_create_missing_teachers', False)
+            
+            # 如果提供了教师文件，自动启用相关功能
+            if teacher_file_path:
+                import_teacher_history = True
+                auto_create_missing_teachers = True
+            
             kwargs.update({
                 'exam_id': form.cleaned_data['exam_id'],
                 'exam_name': form.cleaned_data['exam_name'], 
@@ -495,10 +521,10 @@ class ImportDataAdmin(admin.ModelAdmin):
                 'skip_teacher': form.cleaned_data['skip_teacher'],
                 'smart_match': form.cleaned_data.get('smart_match', False),
                 'force': form.cleaned_data.get('force', False),
-                'import_teacher_history': form.cleaned_data.get('import_teacher_history', False),
+                'import_teacher_history': import_teacher_history,
                 'teacher_file': teacher_file_path,
                 'teacher_sheet': teacher_sheet,
-                'auto_create_missing_teachers': form.cleaned_data.get('auto_create_missing_teachers', False)
+                'auto_create_missing_teachers': auto_create_missing_teachers
             })
         elif isinstance(form, TeacherSubjectsImportForm):
             # 教师学科班级关联数据导入参数

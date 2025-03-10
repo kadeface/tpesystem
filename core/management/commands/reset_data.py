@@ -175,12 +175,12 @@ class Command(BaseCommand):
                     self.stdout.write(self.style.ERROR(f'删除School数据失败: {str(e)}'))
                 
                 # 11. 清空教师数据
-                # self.stdout.write(f'  尝试清空 Teacher 数据...')
-                # try:
-                #     count = Teacher.objects.all().delete()[0]
-                #     self.stdout.write(f'  已成功清空 Teacher 数据: {count} 条记录已删除')
-                # except Exception as e:
-                #     self.stdout.write(self.style.ERROR(f'删除Teacher数据失败: {str(e)}'))
+                self.stdout.write(f'  尝试清空 Teacher 数据...')
+                try:
+                    count = Teacher.objects.all().delete()[0]
+                    self.stdout.write(f'  已成功清空 Teacher 数据: {count} 条记录已删除')
+                except Exception as e:
+                    self.stdout.write(self.style.ERROR(f'删除Teacher数据失败: {str(e)}'))
                 
                 # 12. 清空学期数据
                 self.stdout.write(f'  尝试清空 Semester 数据...')
