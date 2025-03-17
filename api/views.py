@@ -7,6 +7,12 @@ from django.core.cache import cache
 from django.views.decorators.http import require_GET
 from django.contrib.admin.views.decorators import staff_member_required
 import json
+# core/api/views.py
+from django.http import JsonResponse
+from django.views import View
+from django.core.cache import cache
+from core.analytics.report_generator import StudentGrowthAnalysisReport
+
 
 @staff_member_required
 @require_GET
@@ -44,3 +50,66 @@ def task_status(request):
             task_status = {'status': 'error', 'error': '任务状态格式错误'}
     
     return JsonResponse(task_status) 
+
+
+class StudentGrowthAnalysisAPI(View):
+    """学生成长分析API"""
+    
+    def get(self, request, student_id):
+        """获取学生成长分析报告"""
+        # 参数处理
+        refresh = request.GET.get('refresh', '').lower() in ('true', '1', 'yes')
+        cache_key = f"student_growth_report_{student_id}"
+        
+        # 检查缓存
+        if not refresh:
+            cached_report = cache.get(cache_key)
+            if cached_report:
+                return JsonResponse(cached_report)
+                
+        # 生成新报告
+        try:
+            generator = StudentGrowthAnalysisReport(student_id)
+            report = generator.generate()
+            
+            # 缓存报告
+            cache.set(cache_key, report, 3600)  # 缓存1小时
+            
+            return JsonResponse(report)
+        except Exception as e:
+            return JsonResponse({
+                'error': str(e),
+                'message': '生成学生成长分析报告失败'
+            }, status=500)
+    
+    def post(self, request, student_id):
+        """接收反馈并更新分析"""
+        try:
+            # 解析请求数据
+            data = json.loads(request.body)
+            feedback_type = data.get('type')
+            feedback_content = data.get('content')
+            
+            # 简单校验
+            if not feedback_type or not feedback_content:
+                return JsonResponse({
+                    'error': 'Missing required fields',
+                    'message': '反馈类型和内容不能为空'
+                }, status=400)
+                
+            # 存储反馈
+            # StudentFeedback.objects.create(...)
+                
+            # 更新缓存
+            cache_key = f"student_growth_report_{student_id}"
+            cache.delete(cache_key)
+            
+            return JsonResponse({
+                'success': True,
+                'message': '成功接收反馈'
+            })
+        except Exception as e:
+            return JsonResponse({
+                'error': str(e),
+                'message': '处理反馈失败'
+            }, status=500)

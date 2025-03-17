@@ -5,6 +5,7 @@
 from django.urls import path
 from . import views
 from . import admin_imports
+from api.views import StudentGrowthAnalysisAPI
 
 urlpatterns = [
     # 仅保留普通视图路由
@@ -16,4 +17,5 @@ urlpatterns = [
     path('import-scores/', admin_imports.import_scores_view, name='import_scores'),
     path('import-progress/', admin_imports.import_progress_view, name='import_progress'),
     path('task-progress/<uuid:task_id>/', admin_imports.task_progress_view, name='task_progress'),
+    path('api/students/<str:student_id>/growth-analysis/', StudentGrowthAnalysisAPI.as_view(), name='student_growth_analysis'),
 ]

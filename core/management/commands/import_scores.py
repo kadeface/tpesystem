@@ -23,6 +23,7 @@ from django.conf import settings
 from django.core.cache import cache
 from django.core.management import call_command
 from io import StringIO
+from django.db.models import Q
 
 class Command(BaseCommand):
     """
@@ -1093,8 +1094,7 @@ class Command(BaseCommand):
                 # 创建一个简短但唯一的grade_id
                 semester_short = semester_id.replace("-", "")[-3:]  # 例如 "2022-2023-1" 变为 "231"
                 grade_id = f"G{school_id[-2:]}_{grade_level}_{semester_short}"  # 使用学校代码最后两位
-                if len(grade_id) > 10:
-                    grade_id = grade_id[:10]  # 截断以符合长度限制
+
                 
                 # 获取或创建年级
                 grade, created = Grade.objects.get_or_create(
@@ -1140,8 +1140,7 @@ class Command(BaseCommand):
                 # 创建一个简短但唯一的class_id
                 semester_short = semester_id.replace("-", "")[-3:]
                 class_id = f"C{school_id[-2:]}_{grade_level}{class_name}_{semester_short}"  # 使用学校代码最后两位
-                if len(class_id) > 10:
-                    class_id = class_id[:10]  # 截断以符合长度限制
+
                 
                 # 获取或创建班级
                 class_obj, created = Class.objects.get_or_create(
@@ -1447,7 +1446,8 @@ class Command(BaseCommand):
                     options={
                         'teacher_sheet': teacher_sheet,
                         'debug': debug,
-                        'update': True
+                        'update': True,
+                        'auto_create_missing': True  # 强制启用自动创建
                     }
                 )
 
@@ -1805,6 +1805,15 @@ class Command(BaseCommand):
         # 复用 import_teacher_history.py 中的逻辑
         debug = options.get('debug', False)
         update = options.get('update', False)
+        auto_create_missing = options.get('auto_create_missing', False)
+        
+        # 设置self.options用于_process_teacher_row使用
+        self.options = {
+            'auto_create_missing_teachers': auto_create_missing  
+        }
+        
+        if debug:
+            self.stdout.write(f"选项: debug={debug}, update={update}, auto_create_missing={auto_create_missing}")
         
         try:
             # 确保文件存在
@@ -1817,42 +1826,58 @@ class Command(BaseCommand):
                 sheet_name = options.get('teacher_sheet', 'Sheet1')
                 df = pd.read_excel(file_path, sheet_name=sheet_name)
                 self.stdout.write(f'成功读取教师文件，共 {len(df)} 条记录')
+                
+                try:
+                    # 验证数据并获取学科列
+                    valid, subject_columns = self._validate_teacher_data(df)
+                    
+                    # 检查验证结果和column_map是否初始化
+                    if not valid or not hasattr(self, 'column_map') or not self.column_map:
+                        self.stdout.write(self.style.ERROR("教师数据验证失败或列映射未正确初始化"))
+                        return {'created': 0, 'updated': 0, 'errors': 1}
+                    
+                    if debug:
+                        self.stdout.write(f"列映射: {self.column_map}")
+                        self.stdout.write(f"学科列: {subject_columns}")
+                    
+                except Exception as e:
+                    self.stdout.write(self.style.ERROR(f"验证教师数据时出错: {str(e)}"))
+                    return {'created': 0, 'updated': 0, 'errors': 1}
+                
+                # 获取学科映射前确保它不为None
+                subject_map = self._get_subject_id_map(debug) or {}
+                
+                # 获取学期对象
+                try:
+                    semester = Semester.objects.get(semester_id=semester_id)
+                except Semester.DoesNotExist:
+                    self.stdout.write(self.style.ERROR(f"学期不存在: {semester_id}"))
+                    return {'created': 0, 'updated': 0, 'errors': 1}
+                    
+                # 处理每行数据
+                created_count = updated_count = error_count = 0
+                for _, row in df.iterrows():
+                    c, u, e = self._process_teacher_row(row, subject_columns, subject_map, 
+                                                       semester, debug, update)
+                    created_count += c
+                    updated_count += u
+                    error_count += e
+                
+                # 输出结果
+                self.stdout.write(self.style.SUCCESS(
+                    f"教师历史导入完成: 新建 {created_count}, 更新 {updated_count}, 错误 {error_count}"
+                ))
+                
             except Exception as e:
                 self.stdout.write(self.style.ERROR(f"读取Excel文件失败: {str(e)}"))
+                import traceback
+                self.stdout.write(traceback.format_exc())  # 输出完整堆栈
                 return {'created': 0, 'updated': 0, 'errors': 1}
-            
-            # 获取学科映射前确保它不为None
-            subject_map = self._get_subject_id_map(debug) or {}
-            
-            # 验证数据时确保column_map被设置
-            valid, subject_columns = self._validate_teacher_data(df)
-            if not hasattr(self, 'column_map') or not self.column_map:
-                self.stdout.write(self.style.ERROR("列映射未正确初始化"))
-                return {'created': 0, 'updated': 0, 'errors': 1}
-            
-            # 获取学期对象
-            try:
-                semester = Semester.objects.get(semester_id=semester_id)
-            except Semester.DoesNotExist:
-                self.stdout.write(self.style.ERROR(f"学期不存在: {semester_id}"))
-                return {'created': 0, 'updated': 0, 'errors': 1}
-            
-            # 处理每行数据
-            created_count = updated_count = error_count = 0
-            for _, row in df.iterrows():
-                c, u, e = self._process_teacher_row(row, subject_columns, subject_map, 
-                                                   semester, debug, update)
-                created_count += c
-                updated_count += u
-                error_count += e
-            
-            # 输出结果
-            self.stdout.write(self.style.SUCCESS(
-                f"教师历史导入完成: 新建 {created_count}, 更新 {updated_count}, 错误 {error_count}"
-            ))
-            
+        
         except Exception as e:
             self.stdout.write(self.style.ERROR(f"导入教师历史记录失败: {str(e)}"))
+            import traceback
+            self.stdout.write(traceback.format_exc())  # 输出完整堆栈
         
         # 确保函数末尾有明确的返回值
         return {
@@ -1921,18 +1946,7 @@ class Command(BaseCommand):
         }
 
     def _validate_teacher_data(self, df):
-        """
-        验证教师导入数据的有效性。
-        
-        Args:
-            df: DataFrame对象，包含要验证的数据
-            
-        Returns:
-            tuple: (是否有效, 学科列列表)
-            
-        Raises:
-            CommandError: 当数据无效时抛出
-        """
+        """验证教师导入数据的有效性"""
         # 打印所有列名，帮助调试
         self.stdout.write("Excel文件中的列名:")
         for col_idx, col_name in enumerate(df.columns):
@@ -1967,7 +1981,18 @@ class Command(BaseCommand):
             raise CommandError(error_msg)
         
         # 确定学科列 - 排除已识别的列和学校名称列
-        identified_columns = list(actual_column_names.values()) + ['学校名称']
+        identified_columns = list(actual_column_names.values())
+        
+        # 明确指定应该排除的非学科列
+        non_subject_columns = ['学校名称', '学校代码','备注', '序号', '年级班级', '备注', '校长', 
+                              '姓名', '性别', 'ID', '编号', '联系方式', '电话']
+        
+        # 更新排除列表
+        for col in non_subject_columns:
+            if col in df.columns:
+                identified_columns.append(col)
+        
+        # 剩余的列应该是学科教师列
         subject_columns = [col for col in df.columns if col not in identified_columns]
         
         if not subject_columns:
@@ -1981,6 +2006,9 @@ class Command(BaseCommand):
     def _process_teacher_row(self, row, subject_columns, subject_map, semester, debug=False, update_existing=False):
         created_count = updated_count = error_count = 0
         
+        # 启用一个更详细的调试标志
+        super_debug = True
+        
         # 为每行使用独立事务
         try:
             with transaction.atomic():
@@ -1990,18 +2018,42 @@ class Command(BaseCommand):
                 class_name = str(row[self.column_map['班别']]).strip()
                 
                 # 输出调试信息
-                if debug:
+                if debug or super_debug:
                     self.stdout.write(f"处理行: 学校={school_id}, 年级={grade_level}, 班级={class_name}")
                 
                 # 查找学校
                 try:
                     school = School.objects.get(school_id=school_id)
+                    if super_debug:
+                        self.stdout.write(f"  找到学校: {school.school_name} (ID: {school_id})")
                 except School.DoesNotExist:
-                    if debug:
-                        self.stdout.write(self.style.ERROR(f"学校不存在: {school_id}"))
+                    if debug or super_debug:
+                        self.stdout.write(self.style.ERROR(f"  学校不存在: {school_id}"))
                     return 0, 0, 1
                 
-                # 生成与导入分数时相同格式的班级ID和年级ID
+                # 简化班级查找逻辑 - 添加超级调试信息，不要过早返回错误
+                class_obj = None
+                grade = None
+                
+                # 打印所有可能的班级信息
+                if super_debug:
+                    self.stdout.write(f"  正在查找班级: 年级={grade_level}, 班级={class_name}")
+                    try:
+                        # 列出该学校所有班级
+                        all_classes = Class.objects.filter(grade__school__school_id=school_id)
+                        self.stdout.write(f"  该学校共有 {all_classes.count()} 个班级:")
+                        for cls in all_classes[:10]:  # 最多显示10个
+                            self.stdout.write(f"    - ID: {cls.class_id}, 名称: {cls.class_name}")
+                        
+                        # 列出该学校所有年级
+                        all_grades = Grade.objects.filter(school__school_id=school_id)
+                        self.stdout.write(f"  该学校共有 {all_grades.count()} 个年级:")
+                        for grd in all_grades[:10]:  # 最多显示10个
+                            self.stdout.write(f"    - ID: {grd.grade_id}, 名称: {grd.grade_name}")
+                    except Exception as e:
+                        self.stdout.write(f"  查询班级列表时出错: {str(e)}")
+                
+
                 semester_id = semester.semester_id
                 semester_short = semester_id.replace("-", "")[-3:]  # 例如 "2022-2023-1" 变为 "231"
                 
@@ -2020,15 +2072,15 @@ class Command(BaseCommand):
                 try:
                     class_obj = Class.objects.get(class_id=class_id)
                     grade = class_obj.grade
-                    if debug:
-                        self.stdout.write(f"通过新格式班级ID找到班级: {class_id}")
+                    if debug or super_debug:
+                        self.stdout.write(f"  通过新格式班级ID找到班级: {class_id}")
                 except Class.DoesNotExist:
                     # 2. 尝试使用旧格式ID查找
                     try:
                         class_obj = Class.objects.get(class_id=old_class_id)
                         grade = class_obj.grade
-                        if debug:
-                            self.stdout.write(f"通过旧格式班级ID找到班级: {old_class_id}")
+                        if debug or super_debug:
+                            self.stdout.write(f"  通过旧格式班级ID找到班级: {old_class_id}")
                     except Class.DoesNotExist:
                         # 3. 尝试从学校和班级名称查找
                         class_obj = Class.objects.filter(
@@ -2038,8 +2090,8 @@ class Command(BaseCommand):
                         
                         if class_obj:
                             grade = class_obj.grade
-                            if debug:
-                                self.stdout.write(f"通过学校和班级名称找到班级: {class_obj.class_id}")
+                            if debug or super_debug:
+                                self.stdout.write(f"  通过学校和班级名称找到班级: {class_obj.class_id}")
                         else:
                             # 4. 通过学生历史记录查找班级
                             student_history = StudentHistory.objects.filter(
@@ -2051,8 +2103,8 @@ class Command(BaseCommand):
                             if student_history and student_history.class_field:
                                 class_obj = student_history.class_field
                                 grade = student_history.grade
-                                if debug:
-                                    self.stdout.write(f"通过学生历史记录找到班级: {class_obj.class_id}")
+                                if debug or super_debug:
+                                    self.stdout.write(f"  通过学生历史记录找到班级: {class_obj.class_id}")
                             else:
                                 # 5. 尝试查找年级以便创建班级
                                 try:
@@ -2066,8 +2118,8 @@ class Command(BaseCommand):
                                     ).first()
                                 
                                 if grade_obj:
-                                    if debug:
-                                        self.stdout.write(f"找到年级但未找到班级: {grade_level}")
+                                    if debug or super_debug:
+                                        self.stdout.write(f"  找到年级但未找到班级: {grade_level}")
                                     if hasattr(self, 'options') and self.options.get('auto_create_missing_teachers'):
                                         # 创建新班级，使用与导入分数相同的ID格式
                                         class_obj = Class.objects.create(
@@ -2077,20 +2129,27 @@ class Command(BaseCommand):
                                             status='ACTIVE'
                                         )
                                         grade = grade_obj
-                                        if debug:
-                                            self.stdout.write(self.style.SUCCESS(f"自动创建班级: {class_id}"))
+                                        if debug or super_debug:
+                                            self.stdout.write(self.style.SUCCESS(f"  自动创建班级: {class_id}"))
                                     else:
-                                        if debug:
-                                            self.stdout.write(self.style.ERROR(f"找不到班级且未启用自动创建: {class_name}"))
+                                        if debug or super_debug:
+                                            self.stdout.write(self.style.ERROR(f"  找不到班级且未启用自动创建: {class_name}"))
+                                        error_count += 1
+                                        # 不返回错误，改为继续处理其他行
                                         return 0, 0, 1
                                 else:
-                                    if debug:
-                                        self.stdout.write(self.style.ERROR(f"找不到年级: {grade_level} (学校: {school_id})"))
+                                    if debug or super_debug:
+                                        self.stdout.write(self.style.ERROR(f"  找不到年级: {grade_level} (学校: {school_id})"))
+                                    error_count += 1
+                                    # 不返回错误，改为继续处理其他行
                                     return 0, 0, 1
 
                 if not class_obj:
-                    if debug:
-                        self.stdout.write(self.style.ERROR(f"无法找到班级: {class_name} (年级: {grade_level}, 学校: {school_id})"))
+                    if debug or super_debug:
+                        self.stdout.write(self.style.ERROR(f"  无法找到班级: {class_name} (年级: {grade_level}, 学校: {school_id})"))
+                        self.stdout.write(self.style.WARNING("  将跳过这一行的教师导入"))
+                    error_count += 1
+                    # 不返回错误，改为继续处理其他行
                     return 0, 0, 1
                 
                 # 处理每个学科教师
@@ -2102,27 +2161,61 @@ class Command(BaseCommand):
                     if not teacher_name:
                         continue
                     
-                    if debug:
-                        self.stdout.write(f"处理学科: {subject_col}, 教师: {teacher_name}")
+                    if debug or super_debug:
+                        self.stdout.write(f"  处理学科: {subject_col}, 教师: {teacher_name}")
                     
                     # 获取学科ID
                     subject_id = None
                     
-                    # 特殊处理政治学科
-                    if '政治' in subject_col:
-                        subject_id = 'MOR'  # 道德与法治的学科ID
-                    elif subject_col in subject_map:
-                        subject_id = subject_map[subject_col]
-                    else:
-                        # 尝试从映射中查找部分匹配
-                        for key, value in subject_map.items():
-                            if key in subject_col or subject_col in key:
-                                subject_id = value
-                                break
+                    # 建立一个更直观的学科名称匹配字典
+                    direct_subject_map = {
+                        "语文": "CHN", 
+                        "数学": "MATH",
+                        "英语": "ENG",
+                        "物理": "PHY",
+                        "化学": "CHEM",
+                        "生物": "BIO",
+                        "历史": "HIS",
+                        "地理": "GEO",
+                        "政治": "MOR",
+                        "道德与法治": "MOR",
+                        "道法": "MOR",
+                        "信息技术": "IT_M",
+                        "体育与健康": "PE_M",
+                        "通用技术": "TECH",
+                        "思想政治": "POL",
+                        "思政": "POL",
+                        "科学": "SCI",
+                        "美术": "ART",
+                        "音乐": "MUS",
+                        "体育": "PE",
+                        "美术": "ART",
+                        "音乐": "MUS",
+                        "体育": "PE",
+                                
+            
+                    }
+
+                    # 1. 先尝试直接匹配
+                    for subject_name, subject_code in direct_subject_map.items():
+                        if subject_name in subject_col:
+                            subject_id = subject_code
+                            break
+
+                    # 2. 如果没找到，再使用原来的逻辑
+                    if not subject_id:
+                        if subject_col in subject_map:
+                            subject_id = subject_map[subject_col]
+                        else:
+                            # 尝试从映射中查找部分匹配
+                            for key, value in subject_map.items():
+                                if key in subject_col or subject_col in key:
+                                    subject_id = value
+                                    break
                     
                     if not subject_id:
-                        if debug:
-                            self.stdout.write(self.style.ERROR(f"无法识别学科: {subject_col}"))
+                        if debug or super_debug:
+                            self.stdout.write(self.style.ERROR(f"  无法识别学科: {subject_col}"))
                         error_count += 1
                         continue
                     
@@ -2130,8 +2223,8 @@ class Command(BaseCommand):
                     try:
                         subject = Subject.objects.get(subject_id=subject_id)
                     except Subject.DoesNotExist:
-                        if debug:
-                            self.stdout.write(self.style.ERROR(f"学科不存在: {subject_id}"))
+                        if debug or super_debug:
+                            self.stdout.write(self.style.ERROR(f"  学科不存在: {subject_id}"))
                         error_count += 1
                         continue
                     
@@ -2145,34 +2238,45 @@ class Command(BaseCommand):
                         
                         # 2. 如果未找到，尝试通过姓名和学科查找
                         if not teacher:
+                            # 获取当前学校的学段类型
+                            current_school_type = School.objects.get(school_id=school_id).school_type
+                            
+                            # 添加学段限制 - 只查找相同学段的教师
                             teacher = Teacher.objects.filter(
                                 name=teacher_name,
-                                main_subject=subject.subject_name
+                                main_subject=subject.subject_name,
+                                current_school__school_type=current_school_type  # 限制为相同学段
                             ).first()
                         
                         # 3. 如果仍未找到，尝试模糊匹配
                         if not teacher and len(teacher_name) > 1:
-                            if debug:
-                                self.stdout.write(f"尝试模糊匹配教师: {teacher_name}")
+                            if debug or super_debug:
+                                self.stdout.write(f"  尝试模糊匹配教师: {teacher_name}")
                             # 在模糊匹配前添加调试代码
-                            if debug:
-                                self.stdout.write(f"尝试模糊匹配教师: {teacher_name} (长度: {len(teacher_name)})")
-                                self.stdout.write(f"学校ID: {school_id} (长度: {len(school_id)})")
+                            if debug or super_debug:
+                                self.stdout.write(f"  尝试模糊匹配教师: {teacher_name} (长度: {len(teacher_name)})")
+                                self.stdout.write(f"  学校ID: {school_id} (长度: {len(school_id)})")
                             
                             # 确保名称不超过限制长度
                             safe_teacher_name = teacher_name[:20] if len(teacher_name) > 20 else teacher_name
                             
-                            # 修改模糊匹配查询
+                            # 修改模糊匹配查询，添加学段限制
                             try:
+                                # 获取当前学校的学段类型（如果尚未获取）
+                                if 'current_school_type' not in locals():
+                                    current_school_type = School.objects.get(school_id=school_id).school_type
+                                    
                                 possible_teachers = Teacher.objects.filter(
                                     name__contains=safe_teacher_name[:2],
                                     current_school__school_id=school_id
+                                ).filter(
+                                    current_school__school_type=current_school_type  # 限制为相同学段
                                 )
                                 if possible_teachers.exists():
                                     teacher = possible_teachers.first()
                             except Exception as e:
-                                if debug:
-                                    self.stdout.write(self.style.ERROR(f"模糊匹配查询错误: {str(e)}"))
+                                if debug or super_debug:
+                                    self.stdout.write(self.style.ERROR(f"  模糊匹配查询错误: {str(e)}"))
                                 # 避免中断整个处理流程，继续创建新教师
                                 possible_teachers = []
                         
@@ -2185,9 +2289,20 @@ class Command(BaseCommand):
                             
                             # 在创建新教师前确保所有字段长度安全
                             if not teacher:
-                                # 确保各字段长度安全
-                                safe_teacher_name = teacher_name[:20] if len(teacher_name) > 20 else teacher_name
+                                # 获取当前学校的学段类型（如果尚未获取）
+                                if 'current_school_type' not in locals():
+                                    current_school_type = School.objects.get(school_id=school_id).school_type
                                 
+                                # 根据学段设置合适的qualification
+                                qualification = 'JUNIOR'  # 默认初级职称
+                                if current_school_type == 'PRIMARY':
+                                    qualification = 'JUNIOR'  # 小学默认初级
+                                elif current_school_type == 'JUNIOR':
+                                    qualification = 'MIDDLE'  # 初中默认中级
+                                elif current_school_type == 'HIGH':
+                                    qualification = 'SENIOR'  # 高中默认高级
+                                
+                                # 创建教师记录
                                 try:
                                     teacher = Teacher.objects.create(
                                         teacher_id=teacher_id,
@@ -2195,20 +2310,22 @@ class Command(BaseCommand):
                                         gender='U',
                                         birth_date=date(1980, 1, 1),
                                         current_school=school,
-                                        main_subject=subject.subject_name,  # 使用学科ID而不是完整名称
-                                        title='',  # 设置安全的空值
-                                        admin_position='',  # 设置安全的空值
-                                        status='ACTIVE'
+                                        main_subject=subject.subject_name,
+                                        qualification=qualification,  # 设置学段相关的职称
+                                        title='',
+                                        admin_position='',
+                                        status='COMPLETED'
                                     )
                                 except Exception as e:
-                                    
-                                    self.stdout.write(self.style.ERROR(f"自动创建教师错误: {str(e)}"))
-                                if debug:
-                                    self.stdout.write(self.style.ERROR(f"自动创建教师: {teacher_name} (ID: {teacher_id})"))
+                                    error_msg = f"  自动创建教师错误: {str(e)}"
+                                    self._log_teacher_error(error_msg, teacher_name, subject.subject_name)
+                                    self.stdout.write(self.style.ERROR(error_msg))
+                                if debug or super_debug:
+                                    self.stdout.write(self.style.ERROR(f"  自动创建教师: {teacher_name} (ID: {teacher_id})"))
                             
                     except Exception as e:
-                        if debug:
-                            self.stdout.write(self.style.ERROR(f"查找教师错误: {str(e)}"))
+                        if debug or super_debug:
+                            self.stdout.write(self.style.ERROR(f"  查找教师错误: {str(e)}"))
                         error_count += 1
                         continue
                     
@@ -2234,8 +2351,8 @@ class Command(BaseCommand):
                         
                         if exists and not update_existing:
                             # 如果记录已存在且不更新，跳过
-                            if debug:
-                                self.stdout.write(f"跳过已存在的记录: {teacher.name} - {subject.subject_name} - {class_obj.class_name}")
+                            if debug or super_debug:
+                                self.stdout.write(f"  跳过已存在的记录: {teacher.name} - {subject.subject_name} - {class_obj.class_name}")
                             continue
                         
                         # 创建或更新历史记录
@@ -2257,21 +2374,21 @@ class Command(BaseCommand):
                         
                         if created:
                             created_count += 1
-                            if debug:
-                                self.stdout.write(self.style.SUCCESS(f"创建教师历史记录: {teacher.name} - {subject.subject_name} - {class_obj.class_name}"))
+                            if debug or super_debug:
+                                self.stdout.write(self.style.SUCCESS(f"  创建教师历史记录: {teacher.name} - {subject.subject_name} - {class_obj.class_name}"))
                         else:
                             updated_count += 1
-                            if debug:
-                                self.stdout.write(f"更新教师历史记录: {teacher.name} - {subject.subject_name} - {class_obj.class_name}")
+                            if debug or super_debug:
+                                self.stdout.write(f"  更新教师历史记录: {teacher.name} - {subject.subject_name} - {class_obj.class_name}")
                             
                     except Exception as e:
-                        if debug:
-                            self.stdout.write(self.style.ERROR(f"创建历史记录错误: {str(e)}"))
+                        if debug or super_debug:
+                            self.stdout.write(self.style.ERROR(f"  创建历史记录错误: {str(e)}"))
                         error_count += 1
                         
         except Exception as e:
-            if debug:
-                self.stdout.write(self.style.ERROR(f"处理行数据错误: {str(e)}"))
+            if debug or super_debug:
+                self.stdout.write(self.style.ERROR(f"  处理行数据错误: {str(e)}"))
             error_count += 1
             
         return created_count, updated_count, error_count
@@ -2362,4 +2479,21 @@ class Command(BaseCommand):
             # 同时保存到缓存
             cache_key = f"task_progress_{self.progress['task_id']}"
             cache.set(cache_key, self.progress, 3600)
+
+    def _log_teacher_error(self, error_msg, teacher_name=None, subject=None):
+        """记录教师导入错误到文件"""
+        log_dir = os.path.join(settings.MEDIA_ROOT, 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, 'teacher_errors.log')
+        
+        with open(log_file, 'a') as f:
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            f.write(f"[{timestamp}] {error_msg}")
+            if teacher_name:
+                f.write(f" (教师: {teacher_name}")
+            if subject:
+                f.write(f", 学科: {subject}")
+            if teacher_name or subject:
+                f.write(")")
+            f.write("\n")
 

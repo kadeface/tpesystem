@@ -138,7 +138,7 @@ class Class(models.Model):
     Returns:
         班级模型实例
     """
-    class_id = models.CharField(max_length=10, primary_key=True)
+    class_id = models.CharField(max_length=20, primary_key=True, help_text="班级唯一标识")
     class_name = models.CharField(max_length=50)
     grade = models.ForeignKey(Grade, on_delete=models.CASCADE)
     teacher_id = models.CharField(max_length=10)  # 临时字段，之后会替换为ForeignKey
@@ -510,6 +510,12 @@ class Score(models.Model):
         verbose_name = '成绩'
         verbose_name_plural = '成绩管理'
         indexes = [models.Index(fields=['semester_id'])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['student', 'exam', 'subject'],
+                name='unique_score_record'
+            )
+        ]
 
 class SubjectRelation(models.Model):
     """
@@ -605,35 +611,15 @@ class TeacherSubject(models.Model):
 
 class TeacherSubjectClass(models.Model):
     """
-    教师-学科-班级关联模型，存储教师与特定班级学科的教学关系。
-    
-    Args:
-        teacher: 教师
-        subject: 学科
-        class_obj: 班级
-        school: 学校
-        semester: 学期
-        is_main: 是否为主教学科目
-        status: 状态
-    
-    Returns:
-        教师学科班级关联模型实例
+    教师-学科-班级关联模型，记录教师教授的学科和班级。
     """
-    teacher = models.ForeignKey(Teacher, on_delete=models.CASCADE, related_name='teaching_assignments')
-    subject = models.ForeignKey(Subject, on_delete=models.CASCADE, related_name='class_assignments')
-    class_obj = models.ForeignKey(Class, on_delete=models.CASCADE, related_name='subject_teachers')
-    school = models.ForeignKey(School, on_delete=models.CASCADE)
+    teacher = models.ForeignKey(Teacher, on_delete=models.CASCADE)
+    subject = models.ForeignKey(Subject, on_delete=models.CASCADE)
+    class_field = models.ForeignKey(Class, on_delete=models.CASCADE)
     semester = models.ForeignKey(Semester, on_delete=models.CASCADE)
-    is_main = models.BooleanField(default=True)  # 是否为主教学科目 
-    status = models.CharField(max_length=10, default='ACTIVE')
     
     class Meta:
-        verbose_name = '教师学科班级关联'
-        verbose_name_plural = '教师学科班级关联管理'
-        unique_together = ('teacher', 'subject', 'class_obj', 'semester')  # 一个班级在一个学期中一个学科只能有一个主教师
-        indexes = [
-            models.Index(fields=['school', 'semester']),  # 添加复合索引提高查询性能
-        ] 
+        unique_together = [['teacher', 'subject', 'class_field', 'semester']]
 
 class DataImportTool(models.Model):
     """
@@ -714,3 +700,45 @@ class TeacherHistory(models.Model):
     def __str__(self):
         semester_display = self.semester.semester_id.replace('-', '学年第') + '学期'
         return f"{self.teacher.name} - {self.school.school_name} - {semester_display} - {self.subject.subject_name}" 
+
+class ValueAddedConfig(models.Model):
+    """
+    增值评价配置模型，存储不同评价场景的配置。
+    
+    Args:
+        config_id: 配置编号，主键
+        config_name: 配置名称
+        target_type: 评价对象类型
+        method: 评价方法
+        parameters: 评价参数
+        description: 配置描述
+        status: 状态
+        
+    Returns:
+        增值评价配置模型实例
+    """
+    config_id = models.CharField(max_length=60, primary_key=True)
+    config_name = models.CharField(max_length=100)
+    target_type = models.CharField(max_length=10, choices=[
+        ('SCHOOL', '学校'),
+        ('TEACHER', '教师'),
+        ('STUDENT', '学生')
+    ])
+    method = models.CharField(max_length=60, choices=[
+        ('simple_difference', '简单差值法'),
+        ('simple_difference_tes', 'TES差值法'),
+        ('predicted_difference', '预测差值法'),
+        ('hlm', '多层线性模型'),
+        ('ml_random_forest', '随机森林'),
+        ('ml_neural_network', '神经网络')
+    ])
+    parameters = models.JSONField(default=dict)
+    description = models.TextField(blank=True, null=True)
+    status = models.CharField(max_length=10, default='ACTIVE') 
+
+    class Meta:
+        verbose_name = '增值评价配置'
+        verbose_name_plural = '增值评价配置管理'
+        
+    def __str__(self):
+        return f"{self.config_name} ({self.target_type})" 
