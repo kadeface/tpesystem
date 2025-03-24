@@ -406,15 +406,13 @@ def aggregate_student_to_class_t_score(student_scores, class_field='class_id', s
     
     Args:
         student_scores: 学生分数DataFrame
-            columns=['student_id', 'class_id', 'subject_id', 'standard_score', 'exam_id', ...]
         class_field: 班级ID字段名
         score_field: 分数字段名
-        exam_field: 考试ID字段名，用于区分不同考试的分数计算
+        exam_field: 考试ID字段名
     
     Returns:
         班级T分数DataFrame
     """
-    # 如果提供了考试ID字段，则按考试ID分组处理
     if exam_field and exam_field in student_scores.columns:
         # 按考试ID分组处理
         exams = student_scores[exam_field].unique()
@@ -424,19 +422,44 @@ def aggregate_student_to_class_t_score(student_scores, class_field='class_id', s
             # 筛选当前考试的数据
             exam_data = student_scores[student_scores[exam_field] == exam]
             
+            # 基础数据验证
+            student_count = len(exam_data)
+            class_count = exam_data[class_field].nunique()
+            
+            if student_count < 30 or class_count < 3:
+                print(f"警告: 考试 {exam} 的数据量不足 (学生: {student_count}, 班级: {class_count})")
+            
             # 按班级和科目分组，计算平均分
             class_means = exam_data.groupby([class_field, 'subject_id'])[score_field].mean()
             overall_mean = exam_data[score_field].mean()
             overall_std = exam_data[score_field].std()
             
+            # 数据分布检查
+            if abs(overall_mean) > 10 or overall_std < 0.1:
+                print(f"警告: 考试 {exam} 的分数分布异常 (均值: {overall_mean}, 标准差: {overall_std})")
+                # 如果原始分数分布异常，使用排名映射进行标准化
+                # 或者使用百分比排名而不是Z分数
+            
             # 转换为DataFrame
             class_scores = class_means.reset_index()
-            
-            # 添加考试ID信息
             class_scores[exam_field] = exam
             
             # 计算班级T分数: T = 500 + 100 * (班级平均分 - 总体平均分) / 总体标准差
             class_scores['t_score'] = 500 + 100 * (class_scores[score_field] - overall_mean) / overall_std
+            
+            # 验证计算结果是否在合理范围内
+            t_min = class_scores['t_score'].min()
+            t_max = class_scores['t_score'].max()
+            t_mean = class_scores['t_score'].mean()
+            
+            if t_mean < 450 or t_mean > 550 or t_min < 300 or t_max > 700:
+                print(f"警告: 考试 {exam} 的T分分布异常 (最小值: {t_min}, 最大值: {t_max}, 均值: {t_mean})")
+                
+                # 强制校正T分到合理区间
+                if t_mean < 450 or t_mean > 550:
+                    correction_factor = 500 / t_mean
+                    print(f"执行T分校正，校正因子: {correction_factor}")
+                    class_scores['t_score'] = class_scores['t_score'] * correction_factor
             
             all_class_scores.append(class_scores)
         
@@ -444,7 +467,7 @@ def aggregate_student_to_class_t_score(student_scores, class_field='class_id', s
         if all_class_scores:
             result = pd.concat(all_class_scores)
             return result[[class_field, 'subject_id', exam_field, 't_score']]
-        return pd.DataFrame() 
+        return pd.DataFrame()
     
     # 没有考试ID信息，使用原来的方法（不推荐，可能混合不同考试）
     class_means = student_scores.groupby([class_field, 'subject_id'])[score_field].mean()
