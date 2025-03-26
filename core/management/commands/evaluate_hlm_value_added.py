@@ -225,8 +225,7 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.ERROR(f"StudentHistory中没有学期{current_semester_id}的记录"))
                 return None
             
-            # 不要在这里重命名class_field_id，保持原始字段名
-            # 在最终合并后和调用_add_class_info前再重命名
+
             self.stdout.write(f"获取到学生信息: {len(student_info)}条记录")
             self.stdout.write(f"学生信息列: {student_info.columns.tolist()}")
             
@@ -1901,15 +1900,15 @@ class Command(BaseCommand):
         student_data['class_effect'] = student_data['class_id'].map(class_effects_map)
         
         # 计算学生期望分数（基于固定效应和班级随机效应）
-        student_data['expected_score'] = intercept + base_score_coef * student_data['base_score'] + student_data['class_effect']
+        student_data['expected_score'] = intercept + base_score_coef * (
+            student_data['base_score'] - 500  # 去中心化处理
+        ) + student_data['class_effect']
         
         # 计算学生增值（实际分数与期望分数的差值）
         student_data['value_added'] = student_data['current_score'] - student_data['expected_score']
         
-        # 标准化学生增值分数（T分数）
-        mean_va = student_data['value_added'].mean()
-        std_va = student_data['value_added'].std()
-        student_data['value_added_t'] = 50 + 10 * (student_data['value_added'] - mean_va) / std_va
+        # 新标准化方式（直接转换）
+        student_data['value_added_t'] = 50 + (student_data['value_added'] / 10)
         
         # 分类评级
         bins = [0, 35, 45, 55, 65, 100]
@@ -1956,7 +1955,7 @@ class Command(BaseCommand):
                 group_std = student_data.loc[mask, 'value_added'].std()
                 
                 if group_std > 0:  # 避免除零错误
-                    student_data.loc[mask, 'group_value_added_t'] = 500 + 100 * (
+                    student_data.loc[mask, 'group_value_added_t'] = 50 + 10 * (
                         student_data.loc[mask, 'value_added'] - group_mean) / group_std
         
         # 6. 使用复合分数重新排名
