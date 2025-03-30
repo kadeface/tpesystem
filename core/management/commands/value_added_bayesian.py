@@ -31,6 +31,9 @@ from io import BytesIO
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import BarChart, Reference
+import warnings
+import pytensor
+import arviz as az
 
 logger = logging.getLogger(__name__)
 
@@ -234,7 +237,7 @@ class ValueAddedDataProcessor:
         scores = []
         for score in score_query:
             # 验证T分数有效性
-            if score.standard_score < 200 or score.standard_score > 800:
+            if score.standard_score < 200 or score.standard_score > 900:
                 logger.warning(f"发现无效T分数: {score.standard_score}, student_id={score.student_id}, exam_id={score.exam_id}")
                 continue
                 
@@ -909,14 +912,42 @@ class ValueAddedDataProcessor:
                     f"{self.data['norm_class_group'].nunique()}个班级，{self.data['student_id'].nunique()}名学生")
         return self.data
 
+    def get_prepared_data(self):
+        """获取处理后的数据"""
+        # 如果已经有process()方法处理数据，我们可以调用它
+        data, _ = self.process()
+        return data
+
+    def get_mappings(self):
+        """获取各种ID到名称的映射"""
+        # 如果已经有process()方法生成映射，我们可以调用它
+        _, mappings = self.process()
+        return mappings
+
 class ValueAddedAnalyzer:
     """基于贝叶斯多层次模型的增值分析器"""
     
-    def __init__(self, data, teacher_map=None, school_map=None):
-        """初始化增值分析器"""
+    def __init__(self, data, teacher_map=None, school_map=None, mappings=None):
+        """
+        初始化增值分析器
+        
+        Args:
+            data: DataFrame 包含学生成绩数据
+            teacher_map: dict 教师ID到名称的映射
+            school_map: dict 学校ID到名称的映射
+            mappings: dict 包含多种ID映射的字典
+        """
         self.data = data
-        self.teacher_map = teacher_map or {}
-        self.school_map = school_map or {}
+        
+        # 处理mappings参数 (新增)
+        if mappings:
+            self.teacher_map = mappings.get('teachers', {})
+            self.school_map = mappings.get('schools', {})
+            self.student_map = mappings.get('students', {})
+        else:
+            self.teacher_map = teacher_map or {}
+            self.school_map = school_map or {}
+            self.student_map = {}
         
         # 获取数据基本信息
         self.n_students = data['student_id'].nunique()
@@ -1016,165 +1047,211 @@ class ValueAddedAnalyzer:
         return agg_data
 
     def build_hierarchical_model(self):
-        """
-        构建三层增值模型
-            
-        Returns:
-            pm.Model 包含完整结构的PyMC3模型
-        """
-        df = self.data
+        """构建贝叶斯多层次模型"""
+        logger.info(f"开始构建贝叶斯层级模型...")
         
-        # 获取各层级数量
-        n_students = df['student_code'].nunique()
-        n_teachers = df['teacher_code'].nunique() 
-        n_schools = df['school_code'].nunique()
+        # 获取基本数据维度
+        n_records = len(self.data)
+        n_students = self.data['student_id'].nunique()
+        n_classes = self.data['norm_class_group'].nunique()  # 使用规范化班级作为教师代理
+        n_schools = self.data['school_id'].nunique()
         
-        # 确保学生和教师有学校映射
-        student_school = df[['student_code', 'school_code']].drop_duplicates()
-        teacher_school = df[['teacher_code', 'school_code']].drop_duplicates()
-
+        self._create_numeric_indices()
+        
+        # 获取数据索引映射
+        student_idx = self.data['student_idx'].values
+        class_idx = self.data['class_idx'].values  # 班级索引
+        school_idx = self.data['school_idx'].values
+        
+        # 获取模型输入数据 - 确保使用正确的字段名称
+        y = self.data['standard_score'].values  # 确保这是标准化成绩
+        prior_score = self.data['prior_score'].values  # 先前成绩
+        
+        logger.info(f"模型数据维度: 记录数={n_records}, 学生数={n_students}, 班级数={n_classes}, 学校数={n_schools}")
+        
+        # 创建模型
         with pm.Model() as model:
-            # 超先验参数
-            hyper_sd = pm.HalfNormal('hyper_sd', sigma=1)
+            # 超参数先验
+            sigma_s = pm.HalfNormal('sigma_s', sigma=1)
+            sigma_c = pm.HalfNormal('sigma_c', sigma=1)
+            sigma_e = pm.HalfNormal('sigma_e', sigma=1)
             
-            # 学校层效应
-            school_intercept = pm.Normal('school_intercept', 
-                                       mu=0, 
-                                       sigma=hyper_sd,
-                                       shape=n_schools)
+            # 固定效应
+            intercept = pm.Normal('intercept', mu=0, sigma=5)
+            beta_prior = pm.Normal('beta_prior', mu=0.8, sigma=0.2)
             
-            # 学生层基础效应（嵌套在教师中）
-            student_intercept = pm.Normal('student_intercept',
-                                        mu=school_intercept[df['school_code']], 
-                                        sigma=hyper_sd,
-                                        shape=n_students)
+            # 学校随机效应
+            school_effects = pm.Normal('school_effects', mu=0, sigma=sigma_s, shape=n_schools)
             
-            # 时间效应（各层级随机斜率）
-            school_slope = pm.Normal('school_slope', mu=0, sigma=1, shape=n_schools)
-            student_slope = pm.Normal('student_slope',
-                                    mu=school_slope[df['school_code']],
-                                    sigma=1,
-                                    shape=n_students)
+            # 班级随机效应
+            class_effects = pm.Normal('class_effects', mu=0, sigma=sigma_c, shape=n_classes)
             
-            # 先验成绩调整项
-            prior_coeff = pm.Normal('prior_coeff', mu=0.5, sigma=0.1)
+            # 组合效应
+            mu = (intercept + beta_prior * prior_score + 
+                  school_effects[school_idx] + class_effects[class_idx])
             
-            # 模型公式
-            mu = (
-                student_intercept[df['student_code']] +
-                student_slope[df['student_code']] * (df['time_point'] - df['time_point'].min()) +
-                prior_coeff * ((df['prior_score'] - 500) / 100)  # 标准化前置分数
-            )
-            
-            # 残差项
-            sigma = pm.HalfNormal('sigma', sigma=1)
-            
-            # 似然函数
-            score_obs = pm.Normal('score_obs', 
-                                mu=mu, 
-                                sigma=sigma, 
-                                observed=(df['standard_score'] - 500) / 100)  # 标准化目标分数
-            
-        self.model = model
+            # 观测值
+            y_obs = pm.Normal('y_obs', mu=mu, sigma=sigma_e, observed=y)
+        
+        logger.info("贝叶斯层级模型构建完成")
         return model
 
-    def run_analysis(self, confidence=0.95, return_posteriors=False, use_class_model=True, samples=1000, tune=500, cores=2):
-        """运行增值分析"""
-        # 修改调用方式，不直接调用process_data_hierarchically
+    def run_analysis(self, confidence=0.95, return_posteriors=False, use_class_model=True, 
+                    samples=5000, tune=500, cores=2, ceiling_adjust=False):
+        """
+        运行增值分析
+        
+        Args:
+            confidence: float 置信区间水平
+            return_posteriors: bool 是否返回后验分布
+            use_class_model: bool 是否使用班级模型
+            samples: int MCMC采样数
+            tune: int MCMC调优样本数
+            cores: int 使用的核心数
+            ceiling_adjust: bool 是否启用天花板效应调整
+        """
+        # 显示PyTensor配置信息
+        logger.info(f"PyTensor配置: {pytensor.config.cxx}")
+        logger.info(f"编译器状态: {'可用' if pytensor.config.cxx else '不可用'}")
         
         # 首先分析并显示所有学校信息
         logger.info("======= 分析所有学校信息 =======")
         
-        # 收集学校ID和名称
-        school_info = {}
+        # 显示学校信息
+        schools = set()
+        school_names = {}
+        
         for school_id in self.data['school_id'].unique():
-            # 尝试获取学校名称
-            school_name = "未知"
+            schools.add(school_id)
             if 'school_name' in self.data.columns:
-                school_names = self.data[self.data['school_id'] == school_id]['school_name'].unique()
-                if len(school_names) > 0:
-                    school_name = school_names[0]
-            
-            # 记录学校信息
-            school_info[school_id] = school_name
+                school_names[school_id] = self.data[self.data['school_id'] == school_id]['school_name'].iloc[0]
+            else:
+                school_names[school_id] = f"学校{school_id}"
         
-        # 打印学校ID和名称
-        logger.info(f"共发现{len(school_info)}所不同学校:")
-        for school_id, name in sorted(school_info.items()):
-            logger.info(f"学校ID: {school_id}, 名称: {name}")
-            
-            # 对特定学校打印5个学生ID
-            if school_id in ['78301', '78308']:
-                student_ids = self.data[self.data['school_id'] == school_id]['student_id'].unique()
-                sample_ids = student_ids[:5] if len(student_ids) >= 5 else student_ids
-                logger.info(f"  {name}的5个学生ID样本: {', '.join(map(str, sample_ids))}")
+        logger.info(f"共发现{len(schools)}所不同学校:")
+        for school_id in sorted(schools):
+            logger.info(f"学校ID: {school_id}, 名称: {school_names.get(school_id, '未知')}")
         
-        # 剔除学生数量少于10人的学校
+        # 剔除小规模学校
         logger.info("======= 剔除小规模学校 =======")
         school_student_counts = self.data.groupby('school_id')['student_id'].nunique()
         small_schools = school_student_counts[school_student_counts < 10]
         
         if not small_schools.empty:
-            small_school_ids = small_schools.index.tolist()
-            school_names = [school_info.get(id, "未知") for id in small_school_ids]
+            for school_id in small_schools.index:
+                logger.warning(f"移除小规模学校: {school_id}, 仅有{small_schools[school_id]}名学生")
             
-            # 记录要删除的学校
-            for i, school_id in enumerate(small_school_ids):
-                logger.warning(f"移除小规模学校: {school_id} ({school_names[i]}), 仅有{small_schools[school_id]}名学生")
-            
-            # 从数据中移除这些学校
-            original_count = len(self.data)
-            self.data = self.data[~self.data['school_id'].isin(small_school_ids)]
-            removed_count = original_count - len(self.data)
-            
-            logger.info(f"共移除{len(small_schools)}所小规模学校，删除{removed_count}条数据记录")
-            logger.info(f"剔除后剩余{self.data['school_id'].nunique()}所学校，{self.data['student_id'].nunique()}名学生")
+            self.data = self.data[~self.data['school_id'].isin(small_schools.index)]
+            logger.info(f"移除后剩余{self.data['school_id'].nunique()}所学校")
         else:
             logger.info("没有发现学生数量少于10人的学校")
         
-        # 运行学校数据详细分析
+        # 学校详细分析
         self.analyze_school_data()
         
+        # 构建贝叶斯层级模型
+        logger.info("======= 构建贝叶斯层级模型 =======")
+        if ceiling_adjust:
+            logger.info("启用天花板效应调整模型")
+            model = self.build_hierarchical_model_ceiling_adjusted()
+        else:
+            model = self.build_hierarchical_model()
+        
+        # 运行MCMC采样 - 修改这里，设置return_inferencedata=False
+        logger.info(f"======= 运行MCMC采样 (samples={samples}) =======")
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=UserWarning)
+                with model:
+                    # 使用NUTS采样器进行MCMC采样，添加优化参数
+                    trace = pm.sample(
+                        draws=samples,
+                        tune=tune,
+                        chains=1,
+                        cores=cores,
+                        return_inferencedata=False,  # 改为返回传统的MultiTrace对象
+                        target_accept=0.9,
+                        init='adapt_diag',
+                        progressbar=True
+                    )
+        except Exception as e:
+            logger.error(f"MCMC采样失败: {str(e)}")
+            raise ValueError(f"模型采样失败: {str(e)}")
+        
+        # 保存模型和采样结果
+        self.model = model
+        self.trace = trace
+        
+        # 计算增值效应
+        logger.info("======= 计算增值效应 =======")
+        results = self.calculate_value_added()
+        
+        # 直接返回calculate_value_added的结果，而不是重新打包
+        return results  # 这样会返回包含'schools', 'classes', 'students'键的字典
 
     def calculate_value_added(self):
-        """
-        计算各层级增值效应
-        
-        Returns:
-            dict 包含各层级的增值效应数据框
-        """
+        """计算增值效应"""
         if self.trace is None:
-            raise ValueError("请先运行分析再计算增值")
+            raise ValueError("必须先运行分析才能计算增值")
+    
+        try:
+            # 检查trace对象类型并相应处理
+            if hasattr(self.trace, 'posterior'):  # InferenceData对象
+                trace_vars = list(self.trace.posterior.data_vars)
+                
+                # 提取后验分布均值 - 适用于InferenceData
+                school_effects = self.trace.posterior.school_effects.mean(dim=["chain", "draw"]).values
+                class_effects = self.trace.posterior.class_effects.mean(dim=["chain", "draw"]).values
+            else:  # 传统MultiTrace对象
+                trace_vars = self.trace.varnames
+                
+                # 提取后验分布均值 - 适用于MultiTrace
+                school_effects = self.trace['school_effects'].mean(axis=0)
+                class_effects = self.trace['class_effects'].mean(axis=0)
             
-        df = self.data
-        trace = self.trace
-        
-        # 计算各层级增值效应
-        student_slopes = trace['student_slope'].mean(axis=0)
-        school_slopes = trace['school_slope'].mean(axis=0)
-        
-        # 反向映射编码到ID
-        student_map = dict(zip(df['student_code'], df['student_id']))
-        school_map = dict(zip(df['school_code'], df['school_id']))
-        
-        # 学生增值
-        student_df = pd.DataFrame({
-            'student_code': range(len(student_slopes)),
-            'value_added': student_slopes
-        })
-        student_df['student_id'] = student_df['student_code'].map(student_map)
-        
-        # 学校增值
-        school_df = pd.DataFrame({
-            'school_code': range(len(school_slopes)),
-            'value_added': school_slopes
-        })
-        school_df['school_id'] = school_df['school_code'].map(school_map)
-        
-        return {
-            'students': student_df,
-            'schools': school_df
-        }
+            logger.info(f"可用变量: {trace_vars}")
+            
+            # 创建映射字典
+            school_id_list = sorted(self.data['school_id'].unique())
+            class_id_list = sorted(self.data['norm_class_group'].unique())
+            
+            # 创建结果数据框
+            schools_df = pd.DataFrame({
+                'school_id': school_id_list,
+                'value_added': school_effects
+            })
+            
+            classes_df = pd.DataFrame({
+                'class_id': class_id_list,
+                'value_added': class_effects,
+                'school_id': [self.data[self.data['norm_class_group']==c]['school_id'].iloc[0] 
+                             for c in class_id_list]
+            })
+            
+            # 学生的增值基于班级增值
+            student_df = pd.DataFrame()
+            if not self.data.empty:
+                students = self.data[['student_id', 'norm_class_group']].drop_duplicates()
+                students = students.merge(
+                    classes_df[['class_id', 'value_added']],
+                    left_on='norm_class_group',
+                    right_on='class_id',
+                    how='left'
+                )
+                student_df = students[['student_id', 'value_added']]
+            
+            logger.info(f"计算得到{len(schools_df)}所学校和{len(classes_df)}个班级的增值效应")
+            
+            return {
+                'schools': schools_df,
+                'classes': classes_df,
+                'students': student_df
+            }
+        except Exception as e:
+            logger.error(f"计算增值效应时出错: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise
 
     def _validate_data(self, df):
         """验证数据完整性"""
@@ -1194,15 +1271,34 @@ class ValueAddedAnalyzer:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        with self.model:
-            # 收敛诊断
-            pm.plot_forest(self.trace, var_names=['hyper_sd', 'sigma']).savefig(output_dir / 'hyper_params.png')
-            # 学校效应分布
-            pm.plot_posterior(self.trace, var_names=['school_intercept']).savefig(output_dir / 'school_effects.png')
-            # 斜率分布
-            pm.plot_posterior(self.trace, var_names=['school_slope']).savefig(output_dir / 'school_slopes.png')
-            # 收敛轨迹
-            pm.traceplot(self.trace, var_names=['hyper_sd', 'sigma', 'prior_coeff']).savefig(output_dir / 'convergence.png')
+        # 将MultiTrace转换为InferenceData以兼容ArviZ可视化
+        try:
+            import arviz as az
+            # 检查trace类型并转换
+            if not hasattr(self.trace, 'posterior'):
+                # 转换MultiTrace为InferenceData - 使用新版API
+                idata = az.from_pymc(trace=self.trace, model=self.model)
+            else:
+                idata = self.trace
+                
+            # 使用ArviZ的可视化函数
+            az.plot_forest(idata, var_names=['sigma_s', 'sigma_c', 'sigma_e']).savefig(output_dir / 'hyper_params.png')
+            az.plot_posterior(idata, var_names=['intercept', 'beta_prior']).savefig(output_dir / 'fixed_effects.png')
+            az.plot_trace(idata, var_names=['sigma_s', 'sigma_c', 'sigma_e', 'intercept', 'beta_prior']).savefig(output_dir / 'convergence.png')
+            
+            # 保存效应分布图
+            school_sample = min(20, len(self.data['school_id'].unique()))
+            az.plot_forest(idata, var_names=['school_effects'][:school_sample]).savefig(output_dir / 'school_effects.png')
+            
+            class_sample = min(20, len(self.data['norm_class_group'].unique()))
+            az.plot_forest(idata, var_names=['class_effects'][:class_sample]).savefig(output_dir / 'class_effects.png')
+            
+            logger.info(f"诊断报告已保存到: {output_dir}")
+            
+        except Exception as e:
+            logger.error(f"生成诊断报告时出错: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
 
     def build_class_level_model(self):
         """使用优化的班级群体ID构建模型"""
@@ -1550,6 +1646,87 @@ class ValueAddedAnalyzer:
                     f"{self.data['norm_class_group'].nunique()}个班级，{self.data['student_id'].nunique()}名学生")
         return self.data
 
+    def build_hierarchical_model_ceiling_adjusted(self):
+        """构建考虑天花板效应的贝叶斯层级模型"""
+        
+        # 首先创建数值索引
+        self._create_numeric_indices()
+        
+        # 获取数据维度
+        n_records = len(self.data)
+        n_students = self.data['student_id'].nunique()
+        n_classes = self.data['norm_class_group'].nunique()
+        n_schools = len(self.data['school_id'].unique())
+        
+        # 提取数据向量
+        y = self.data['standard_score'].values
+        prior_score = self.data['prior_score'].values
+        student_idx = self.data['student_idx'].values
+        class_idx = self.data['class_idx'].values
+        school_idx = self.data['school_idx'].values
+        
+        # 计算最大可能分数和接近极限分数的学生比例
+        max_score = self.data['standard_score'].max()
+        near_ceiling = np.mean(self.data['prior_score'] > (max_score * 0.9))
+        logger.info(f"接近满分学生比例: {near_ceiling:.2%}")
+        
+        # 创建模型
+        with pm.Model() as model:
+            # 超参数先验
+            sigma_s = pm.HalfNormal('sigma_s', sigma=1)
+            sigma_c = pm.HalfNormal('sigma_c', sigma=1)
+            sigma_e = pm.HalfNormal('sigma_e', sigma=1)
+            
+            # 固定效应
+            intercept = pm.Normal('intercept', mu=0, sigma=5)
+            
+            # 非线性项 - 处理天花板效应
+            beta_prior = pm.Normal('beta_prior', mu=0.8, sigma=0.2)
+            beta_prior_sq = pm.Normal('beta_prior_sq', mu=-0.1, sigma=0.1)  # 二次项，捕捉非线性关系
+            
+            # 学校和班级随机效应
+            school_effects = pm.Normal('school_effects', mu=0, sigma=sigma_s, shape=n_schools)
+            class_effects = pm.Normal('class_effects', mu=0, sigma=sigma_c, shape=n_classes)
+            
+            # 非线性组合效应
+            # 加入二次项以捕捉高分段的非线性关系
+            mu_linear = (intercept + beta_prior * prior_score + 
+                        beta_prior_sq * (prior_score**2) + 
+                        school_effects[school_idx] + class_effects[class_idx])
+            
+            # 使用转换函数处理极端值的异方差性
+            # 高分学生的方差往往更小
+            variance_factor = pm.math.switch(prior_score > (max_score * 0.8), 
+                                          0.5 * sigma_e,  # 高分学生方差减半
+                                          sigma_e)        # 其他学生正常方差
+            
+            # 观测值
+            y_obs = pm.Normal('y_obs', mu=mu_linear, sigma=variance_factor, observed=y)
+        
+        return model
+
+    def _create_numeric_indices(self):
+        """创建模型所需的数值索引映射"""
+        if 'student_idx' not in self.data.columns:
+            # 创建学生索引映射
+            student_ids = self.data['student_id'].unique()
+            student_id_to_idx = {id: idx for idx, id in enumerate(student_ids)}
+            self.data['student_idx'] = self.data['student_id'].map(student_id_to_idx)
+        
+        if 'class_idx' not in self.data.columns:
+            # 创建班级索引映射
+            class_ids = self.data['norm_class_group'].unique()
+            class_id_to_idx = {id: idx for idx, id in enumerate(class_ids)}
+            self.data['class_idx'] = self.data['norm_class_group'].map(class_id_to_idx)
+        
+        if 'school_idx' not in self.data.columns:
+            # 创建学校索引映射
+            school_ids = self.data['school_id'].unique()
+            school_id_to_idx = {id: idx for idx, id in enumerate(school_ids)}
+            self.data['school_idx'] = self.data['school_id'].map(school_id_to_idx)
+        
+        return self.data
+
 class Command(BaseCommand):
     """增值分析管理命令"""
     
@@ -1570,6 +1747,11 @@ class Command(BaseCommand):
                           help='将结果保存到数据库')
         parser.add_argument('--excel', action='store_true',
                           help='导出结果到Excel文件')
+        parser.add_argument(
+                            '--ceiling-adjust',
+                            action='store_true',
+                            help='启用天花板效应校正（适用于高分群体评价）'
+        )
                           
     def handle(self, *args, **options):
         try:
@@ -1596,20 +1778,30 @@ class Command(BaseCommand):
             # 处理数据
             data, mappings = processor.process()
             
-            # 初始化分析器并设置数据
-            analyzer = ValueAddedAnalyzer(data)
+            # 初始化分析器并设置数据 - 使用处理后的数据和映射
+            analyzer = ValueAddedAnalyzer(
+                data,  # 直接使用process()返回的数据
+                mappings=mappings  # 直接使用process()返回的映射
+            )
             
-            # 运行分析
-            results = analyzer.run_analysis(samples=options['samples'])
+            # 运行分析，添加天花板效应调整参数
+            results = analyzer.run_analysis(
+                samples=options['samples'],
+                ceiling_adjust=options.get('ceiling_adjust', False)  # 新增参数
+            )
             
             # 保存结果
             output_dir = options['output']
             output_dir.mkdir(parents=True, exist_ok=True)
             
-            for entity, df in results.items():
-                df_path = output_dir / f"{entity}_effects.csv"
-                df.to_csv(df_path, index=False)
-                self.stdout.write(f"已保存{entity}增值结果到: {df_path}")
+            # 修正这部分，确保使用正确的键名
+            for entity_name, df in results.items():
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    df_path = output_dir / f"{entity_name}_effects.csv"
+                    df.to_csv(df_path, index=False)
+                    self.stdout.write(f"已保存{entity_name}增值结果到: {df_path}")
+                else:
+                    self.stdout.write(f"警告: {entity_name}增值结果为空")
             
             # 生成诊断报告
             self.stdout.write("正在生成诊断报告...")
@@ -1692,19 +1884,7 @@ class Command(BaseCommand):
                 ) 
 
     def _export_to_excel(self, results, raw_data, output_dir, subject_id=None, mappings=None):
-        """
-        将结果导出为Excel格式
-        
-        Args:
-            results: dict 各层级增值结果
-            raw_data: DataFrame 原始数据
-            output_dir: Path 输出目录
-            subject_id: str 学科ID
-            mappings: dict ID映射
-            
-        Returns:
-            Path Excel文件路径
-        """
+        """将结果导出为Excel格式"""
         subject_name = "全学科" if not subject_id else Subject.objects.get(subject_id=subject_id).subject_name
         current_semester = Semester.objects.filter(status='ACTIVE').latest('end_date')
         
@@ -1715,35 +1895,87 @@ class Command(BaseCommand):
         # 准备数据
         student_results = results['students'].copy()
         school_results = results['schools'].copy()
+        class_results = results.get('classes', pd.DataFrame()).copy()
         
         # 添加名称映射
         if mappings:
-            # 添加学生姓名
-            if 'students' in mappings and not student_results.empty:
-                student_results['学生姓名'] = student_results['student_id'].map(
-                    lambda x: mappings['students'].get(x, "未知")
-                )
-            
             # 添加学校名称
             if 'schools' in mappings and not school_results.empty:
                 school_results['学校名称'] = school_results['school_id'].map(
                     lambda x: mappings['schools'].get(x, "未知")
                 )
-                
-        # 标准化增值分数（Z分转换为0-100分制）
-        for df in [student_results, school_results]:
-            df['增值得分'] = df['value_added'].apply(
-                lambda x: min(100, max(0, 50 + x * 15))  # 中心化为50分，标准差为15
+            
+            # 添加学生姓名
+            if 'students' in mappings and not student_results.empty:
+                student_results['学生姓名'] = student_results['student_id'].map(
+                    lambda x: mappings['students'].get(x, "未知")
+                )
+        
+        # 获取学生到班级和学校的映射关系
+        student_to_class_school = raw_data[['student_id', 'norm_class_group', 'school_id']].drop_duplicates('student_id')
+        
+        # 班级增加名称标识
+        class_mapping = {}
+        if not raw_data.empty:
+            class_info = raw_data[['norm_class_group', 'school_id', 'class_name']].drop_duplicates('norm_class_group')
+            for _, row in class_info.iterrows():
+                class_id = row['norm_class_group']
+                school_id = row['school_id']
+                class_name = row.get('class_name', f"班级{class_id}")
+                class_mapping[class_id] = class_name
+        
+        # 班级添加具体班级名称
+        if not class_results.empty:
+            class_results['班级名称'] = class_results['class_id'].map(lambda x: class_mapping.get(x, f"班级{x}"))
+        
+        # 添加学校班级关联到学生数据
+        if not student_results.empty:
+            # 关联班级信息
+            student_results = student_results.merge(
+                student_to_class_school,
+                on='student_id',
+                how='left'
             )
             
-            # 增加评级
-            df['增值评级'] = df['增值得分'].apply(
-                lambda x: 'A+' if x >= 80 else 
-                         ('A' if x >= 70 else
-                         ('B' if x >= 60 else
-                         ('C' if x >= 40 else
-                         ('D' if x >= 30 else 'D-'))))
+            # 关联班级名称
+            student_results['班级名称'] = student_results['norm_class_group'].map(
+                lambda x: class_mapping.get(x, f"班级{x}") if pd.notna(x) else "未知"
             )
+            
+            # 关联学校名称
+            if 'schools' in mappings:
+                student_results['学校名称'] = student_results['school_id'].map(
+                    lambda x: mappings['schools'].get(x, "未知") if pd.notna(x) else "未知"
+                )
+        
+        # 标准化增值分数 - 使用百分位数方法替代固定公式
+        for df_name, df in [('schools', school_results), ('classes', class_results), ('students', student_results)]:
+            if not df.empty:
+                # 计算z分数
+                df['z_score'] = (df['value_added'] - df['value_added'].mean()) / df['value_added'].std()
+                
+                # 计算百分位数
+                df['percentile'] = df['value_added'].rank(pct=True) * 100
+                
+                # 基于百分位数的标准化分数 (0-100)
+                df['增值得分'] = df['percentile']
+                
+                # 更合理的评级分配 - 基于百分位数
+                df['增值评级'] = df['percentile'].apply(
+                    lambda x: 'A+' if x >= 90 else     # 前10%
+                             ('A' if x >= 75 else      # 前25%
+                             ('B' if x >= 50 else      # 中间水平
+                             ('C' if x >= 25 else      # 后25%
+                             ('D' if x >= 10 else 'D-')))) # 后10%
+                )
+                
+                logger.info(f"{df_name}增值评价分布: " + 
+                           f"A+={len(df[df['增值评级']=='A+'])}，" +
+                           f"A={len(df[df['增值评级']=='A'])}，" +
+                           f"B={len(df[df['增值评级']=='B'])}，" +
+                           f"C={len(df[df['增值评级']=='C'])}，" +
+                           f"D={len(df[df['增值评级']=='D'])}，" +
+                           f"D-={len(df[df['增值评级']=='D-'])}")
         
         # 创建Excel写入器
         with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
@@ -1759,9 +1991,26 @@ class Command(BaseCommand):
                 self._format_sheet(writer.sheets['学校增值'])
                 self._add_chart(writer, '学校增值', '学校名称', '增值得分', '学校增值效果分析')
             
+            # 写入班级增值页
+            if not class_results.empty:
+                # 添加学校名称到班级数据
+                if not school_results.empty and 'schools' in mappings:
+                    class_results['学校名称'] = class_results['school_id'].map(
+                        lambda x: mappings['schools'].get(x, "未知")
+                    )
+                else:
+                    class_results['学校名称'] = "未知"
+                
+                cols = ['class_id', '班级名称', '学校名称', '增值得分', '增值评级']
+                class_results[cols].rename(columns={'class_id': '班级ID'}).to_excel(
+                    writer, sheet_name='班级增值', index=False
+                )
+                self._format_sheet(writer.sheets['班级增值'])
+                self._add_chart(writer, '班级增值', '班级名称', '增值得分', '班级增值分析')
+            
             # 写入学生增值页
             if not student_results.empty:
-                cols = ['student_id', '学生姓名', '增值得分', '增值评级']
+                cols = ['student_id', '学生姓名', '班级名称', '学校名称', '增值得分', '增值评级']
                 student_results[cols].rename(columns={'student_id': '学生ID'}).to_excel(
                     writer, sheet_name='学生增值', index=False
                 )
@@ -1786,6 +2035,7 @@ class Command(BaseCommand):
             ['', ''],
             ['结果摘要', ''],
             ['学校平均增值', f"{results['schools']['value_added'].mean():.4f}"],
+            ['班级平均增值', f"{results['classes']['value_added'].mean():.4f}"],
             ['学生平均增值', f"{results['students']['value_added'].mean():.4f}"],
         ])
         
