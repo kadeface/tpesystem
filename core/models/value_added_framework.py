@@ -57,7 +57,9 @@ class ValueAddedDataProcessor:
             'schools': {},
             'teachers': {},
             'students': {},
-            'classes': {}
+            'classes': {},
+            'exams': {},
+            'subjects': {}
         }
         self.data = None
         self.model_data = None
@@ -111,8 +113,22 @@ class ValueAddedDataProcessor:
         # 标准化分数
         model_data = self._standardize_scores(model_data)
         
+        # 添加学校和班级名称列
+        if 'school_id' in model_data.columns and 'school_idx' in model_data.columns:
+            model_data['school_name'] = model_data['school_id'].astype(str)
+        
+        if 'class_id' in model_data.columns and 'class_idx' in model_data.columns:
+            model_data['class_name'] = model_data['class_id'].astype(str)
+        
         # 验证数据完整性
         self._validate_data(model_data)
+        
+        # 检查班级数量并记录
+        if 'class_idx' in model_data.columns:
+            unique_classes = model_data['class_idx'].nunique()
+            logger.info(f"模型数据包含{unique_classes}个唯一班级")
+            if unique_classes > 200:  # 预期班级数的合理上限
+                logger.warning(f"班级数量({unique_classes})异常高，请检查数据处理")
         
         self.model_data = model_data
         logger.info(f"准备了{len(model_data)}条建模数据")
@@ -134,24 +150,19 @@ class ValueAddedDataProcessor:
             DataFrame: 添加了前测信息的数据
         """
         # 确保数据包含必要字段
-        required_fields = ['student_id', 'standard_score']
+        required_fields = ['student_id', 'standard_score', 'exam_id']
         missing_fields = [f for f in required_fields if f not in data.columns]
         if missing_fields:
             raise ValueError(f"数据缺少必要字段: {missing_fields}")
         
-        # 按学生ID和时间排序
-        if 'exam_date' in data.columns:
-            prep_data = data.sort_values(['student_id', 'exam_date'])
-        elif 'semester_id' in data.columns:
-            prep_data = data.sort_values(['student_id', 'semester_id'])
-        else:
-            raise ValueError("数据缺少时间排序字段")
+        # 按学生ID和考试ID排序
+        prep_data = data.sort_values(['student_id', 'exam_id'])
         
-        # 为每个学生创建时间点索引
-        prep_data['time_point'] = prep_data.groupby('student_id').cumcount()
+        # 为每个学生创建时间点索引（基于考试ID）
+        prep_data['time_point'] = prep_data.groupby('student_id')['exam_id'].rank(method='dense')
         
         # 获取前测成绩(第一次考试)
-        prior_scores = prep_data[prep_data['time_point'] == 0].copy()
+        prior_scores = prep_data[prep_data['time_point'] == 1].copy()
         prior_scores = prior_scores[['student_id', 'standard_score']]
         prior_scores.rename(columns={'standard_score': 'prior_score'}, inplace=True)
         
@@ -176,26 +187,40 @@ class ValueAddedDataProcessor:
         # 创建学校索引
         if 'school_id' in indexed_data.columns:
             indexed_data['school_idx'] = indexed_data['school_id'].astype('category').cat.codes
-            self.mappings['school_indices'] = dict(zip(
+            self.mappings['schools'] = dict(zip(
                 indexed_data['school_id'].unique(), 
                 indexed_data['school_idx'].unique()
             ))
         
         # 创建班级索引
-        class_col = 'norm_class_group' if 'norm_class_group' in indexed_data.columns else 'class_id'
-        if class_col in indexed_data.columns:
-            indexed_data['class_idx'] = indexed_data[class_col].astype('category').cat.codes
-            self.mappings['class_indices'] = dict(zip(
-                indexed_data[class_col].unique(), 
+        if 'class_id' in indexed_data.columns:
+            indexed_data['class_idx'] = indexed_data['class_id'].astype('category').cat.codes
+            self.mappings['classes'] = dict(zip(
+                indexed_data['class_id'].unique(), 
                 indexed_data['class_idx'].unique()
             ))
         
         # 创建学生索引
         indexed_data['student_idx'] = indexed_data['student_id'].astype('category').cat.codes
-        self.mappings['student_indices'] = dict(zip(
+        self.mappings['students'] = dict(zip(
             indexed_data['student_id'].unique(), 
             indexed_data['student_idx'].unique()
         ))
+        
+        # 创建考试索引
+        indexed_data['exam_idx'] = indexed_data['exam_id'].astype('category').cat.codes
+        self.mappings['exams'] = dict(zip(
+            indexed_data['exam_id'].unique(), 
+            indexed_data['exam_idx'].unique()
+        ))
+        
+        # 创建学科索引
+        if 'subject_id' in indexed_data.columns:
+            indexed_data['subject_idx'] = indexed_data['subject_id'].astype('category').cat.codes
+            self.mappings['subjects'] = dict(zip(
+                indexed_data['subject_id'].unique(), 
+                indexed_data['subject_idx'].unique()
+            ))
         
         return indexed_data
     
@@ -262,6 +287,44 @@ class ValueAddedDataProcessor:
         if na_counts.sum() > 0:
             raise ValueError(f"数据存在缺失值: {na_counts}")
             
+        return True
+
+    def validate_for_models(self, models=None):
+        """
+        验证处理后的数据是否满足指定模型的需求
+        
+        Args:
+            models: 模型名称列表或模型类列表，None表示验证所有已知模型
+            
+        Returns:
+            bool: 数据是否满足所有指定模型的需求
+            
+        Raises:
+            ValueError: 如果数据不满足需求
+        """
+        if not self.model_data:
+            raise ValueError("请先调用prepare_model_data准备数据")
+        
+        # 默认验证所有模型
+        if models is None:
+            from core.value_added_models import MODEL_MAPPING
+            models = MODEL_MAPPING.values()
+        
+        # 收集所有必需字段
+        all_required_fields = set()
+        for model in models:
+            # 基本字段：所有模型都需要
+            all_required_fields.update(['prior_score', 'standard_score', 'student_idx'])
+            
+            # 模型特定字段
+            if model in [BayesianValueAddedModel]:
+                all_required_fields.update(['class_idx', 'school_idx'])
+        
+        # 检查缺失字段
+        missing_fields = [f for f in all_required_fields if f not in self.model_data.columns]
+        if missing_fields:
+            raise ValueError(f"处理后的数据缺少以下模型所需字段: {missing_fields}")
+        
         return True
 
 
@@ -1085,15 +1148,16 @@ class DynamicBayesianValueAddedModel(BaseValueAddedModel):
 class ValueAddedVisualizer:
     """增值分析结果可视化器"""
     
-    def __init__(self, results=None):
+    def __init__(self, results=None, model_name=None):
         """
         初始化可视化器
         
         Args:
             results: 模型结果字典
+            model_name: 模型名称(用于标题)
         """
         self.results = results
-    
+        
     def visualize(self, output_dir, results=None):
         """
         生成可视化结果

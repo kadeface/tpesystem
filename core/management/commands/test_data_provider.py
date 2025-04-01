@@ -78,6 +78,15 @@ class Command(BaseCommand):
                 self.stdout.write(f"\n学校摘要 ({len(school_summary)}所学校):")
                 self.stdout.write(f"平均班级数: {school_summary['class_count'].mean():.1f}")
                 self.stdout.write(f"平均学生数: {school_summary['student_count'].mean():.1f}")
+                
+                # 显示所有学校名称及其详细信息
+                self.stdout.write("\n各学校详细信息:")
+                for _, school in school_summary.iterrows():
+                    self.stdout.write(f"学校ID: {school['school_id']}, "
+                                     f"学校名称: {school['school_name']}, "
+                                     f"班级数: {school['class_count']}, "
+                                     f"学生数: {school['student_count']}, "
+                                     f"平均分: {school['mean_score']:.1f}")
             
             # 准备建模数据
             model_data = data_provider.prepare_for_modeling()

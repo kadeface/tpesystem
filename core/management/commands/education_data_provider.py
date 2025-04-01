@@ -209,8 +209,32 @@ class EducationDataProvider:
         if missing:
             raise ValueError(f"缺失必要字段: {missing}")
         
-        # 直接按考试ID和学校ID分组统计
-        school_summary = self._processed_df.groupby(['exam_id', 'school_id']).agg({
+        # 首先确保有学校名称信息
+        df = self._processed_df.copy()
+        if 'school_name' not in df.columns or df['school_name'].isna().all():
+            try:
+                # 尝试从数据库获取学校名称
+                school_ids = df['school_id'].unique().tolist()
+                schools = {
+                    str(school.id): school.school_name 
+                    for school in School.objects.filter(id__in=school_ids)
+                }
+                
+                # 用实际学校名称更新DataFrame
+                df['school_name'] = df['school_id'].astype(str).map(
+                    lambda x: schools.get(x, f"学校{x}")
+                )
+                logger.info(f"学校摘要: 从数据库获取了{len(schools)}个学校的名称")
+            except Exception as e:
+                logger.error(f"获取学校名称失败: {str(e)}")
+                # 失败时使用学校ID作为名称
+                df['school_name'] = df['school_id'].astype(str).map(lambda x: f"学校{x}")
+        
+        # 获取每个学校ID对应的名称，用于后续合并
+        school_names = df.groupby('school_id')['school_name'].first().reset_index()
+        
+        # 按考试ID和学校ID分组统计
+        school_summary = df.groupby(['exam_id', 'school_id']).agg({
             'student_id': 'nunique',  # 每个考试每个学校的参考学生数
             'standard_score': ['mean', 'std', 'min', 'max'],
             'raw_score': ['mean', 'std', 'min', 'max'],
@@ -219,7 +243,27 @@ class EducationDataProvider:
         
         # 列名处理
         school_summary.columns = ['student_count', 'mean_score', 'std_score', 'min_score', 'max_score', 'raw_mean', 'raw_std', 'raw_min', 'raw_max', 'class_count']
-        return school_summary.reset_index()
+        school_summary = school_summary.reset_index()
+        
+        # 合并学校名称
+        school_summary = pd.merge(
+            school_summary,
+            school_names,
+            on='school_id',
+            how='left'
+        )
+        
+        # 检查是否所有学校都有名称
+        missing_names = school_summary['school_name'].isna().sum()
+        if missing_names > 0:
+            logger.warning(f"{missing_names}所学校缺少名称")
+            # 为缺少名称的学校提供默认名称
+            school_summary['school_name'] = school_summary.apply(
+                lambda row: row['school_name'] if pd.notna(row['school_name']) else f"学校{row['school_id']}", 
+                axis=1
+            )
+        
+        return school_summary
     
     def _get_exams(self):
         """获取目标考试信息"""
@@ -314,6 +358,28 @@ class EducationDataProvider:
         
         # 保留班级原始ID
         history_df['class_id'] = history_df['class_field_id']
+        
+        # 如果school_name列为空，尝试从School模型直接获取学校名称
+        if 'school_name' not in history_df.columns or history_df['school_name'].isna().any():
+            try:
+                # 获取唯一学校ID
+                school_ids = history_df['school_id'].unique().tolist()
+                
+                # 从School模型获取学校名称
+                schools = {
+                    str(school.id): school.school_name 
+                    for school in School.objects.filter(id__in=school_ids)
+                }
+                
+                # 用实际学校名称更新DataFrame
+                history_df['school_name'] = history_df['school_id'].astype(str).map(
+                    lambda x: schools.get(x, f"学校{x}")
+                )
+                logger.info(f"从数据库获取了{len(schools)}个学校的名称")
+            except Exception as e:
+                logger.error(f"获取学校名称失败: {str(e)}")
+                # 失败时使用学校ID作为名称
+                history_df['school_name'] = history_df['school_id'].astype(str)
         
         return history_df
     
