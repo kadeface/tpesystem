@@ -28,7 +28,8 @@ from core.value_added_models import (
     FixedEffectsValueAddedModel,
     RandomEffectsValueAddedModel,
     ValueAddedDataProcessor,
-    ValueAddedVisualizer
+    ValueAddedVisualizer,
+    NonlinearStudentPotentialEvaluator
 )
 
 logger = logging.getLogger(__name__)
@@ -39,20 +40,20 @@ MODEL_MAPPING = {
     'bayesian': BayesianValueAddedModel,
     'frequentist': FrequentistValueAddedModel,
     'fixed': FixedEffectsValueAddedModel,
-    'random': RandomEffectsValueAddedModel
+    'random': RandomEffectsValueAddedModel,
+    'nonlinear_potential': 'special_handler'
 }
 
 class Command(BaseCommand):
     """测试增值分析模型的Django命令"""
     
-    help = '使用不同模型进行增值分析并比较结果'
+    help = '使用不同模型进行增值分析或学生潜力评估并比较结果'
     
     def add_arguments(self, parser):
         """添加命令行参数"""
         parser.add_argument('--exams', nargs='+', type=str, required=True, help='考试ID列表')
         parser.add_argument('--subject', type=str, required=True, help='学科ID')
-        parser.add_argument('--model', nargs='+', choices=MODEL_MAPPING.keys(), default=['tvam'],
-                           help='要测试的模型类型')
+        parser.add_argument('--model', nargs='+', default=['tvam'], help='要测试的模型，可选: tvam, bayesian, frequentist, fixed, random, nonlinear_potential')
         parser.add_argument('--control', nargs='+', default=[], help='控制变量列表')
         parser.add_argument('--entity', choices=['school', 'class'], default='class', 
                            help='分析实体类型')
@@ -62,6 +63,7 @@ class Command(BaseCommand):
         parser.add_argument('--cohort', action='store_true', 
                            help='使用学生队列进行跨年级增值分析')
         parser.add_argument('--baseline', type=str, help='指定基准考试ID')
+        parser.add_argument('--student-id', type=str, help='用于潜力评估的特定学生ID')
     
     def handle(self, *args, **options):
         """命令处理入口"""
@@ -95,39 +97,39 @@ class Command(BaseCommand):
             self.stdout.write(f"- 模型: {options['model']}")
             self.stdout.write(f"- 控制变量: {options['control']}")
             
-            # 1. 直接使用数据处理器获取和处理数据
-            self.stdout.write(self.style.SUCCESS("1. 获取和准备数据"))
+            # 1. 仅获取原始数据，不做处理
+            self.stdout.write(self.style.SUCCESS("1. 获取原始数据"))
             processor = ValueAddedDataProcessor()
             processor.load_data(exam_ids=options['exams'], subject_id=options['subject'], 
                                baseline_exam=options.get('baseline'))
-            processor.prepare_model_data()
             
             # 显示基准考试信息
             if hasattr(processor, 'baseline_exams'):
                 self.stdout.write(self.style.SUCCESS(f"- 基准考试: {', '.join(processor.baseline_exams)}"))
             
-            self.stdout.write(f"- 准备了{len(processor.model_data)}条建模数据")
+            self.stdout.write(f"- 获取了{len(processor.data)}条原始数据")
             
-            # 2. 数据处理
-            self.stdout.write(self.style.SUCCESS("2. 准备建模数据"))
-            model_data = processor.prepare_model_data()
-
-            # 验证数据是否满足所有指定模型的需求
-            model_classes = [MODEL_MAPPING[model_name] for model_name in options['model']]
-            processor.validate_for_models(model_classes)
-
-            self.stdout.write(f"- 准备了{len(model_data)}条建模数据")
-            
-            # 3. 创建输出目录
+            # 2. 创建输出目录
             output_dir = options['output']
             os.makedirs(output_dir, exist_ok=True)
             
             # 存储各模型结果
             results = {}
             
-            # 4. 测试每个指定的模型
+            # 3. 测试每个指定的模型 - 每个模型负责自己的数据准备
+            self.stdout.write(self.style.SUCCESS("2. 执行模型分析"))
             for model_name in options['model']:
-                self.stdout.write(self.style.SUCCESS(f"4. 测试{model_name}模型"))
+                self.stdout.write(f"- 使用{model_name}模型进行分析")
+                
+                # 特殊处理非线性潜力评估模型
+                if model_name == 'nonlinear_potential':
+                    self._handle_nonlinear_potential(processor, options, output_dir)
+                    continue
+                
+                # 特殊处理TVAM模型
+                if model_name == 'tvam':
+                    self._handle_tvam_model(processor, options, output_dir)
+                    continue
                 
                 try:
                     # 获取模型类
@@ -135,7 +137,7 @@ class Command(BaseCommand):
                     
                     # 构建模型参数
                     model_kwargs = {
-                        'data': model_data,
+                        'data': processor.data,
                         'covariates': options['control'],
                         'use_cohort': options['cohort']
                     }
@@ -236,3 +238,214 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR(f"发生错误: {str(e)}"))
             logger.exception("测试过程中发生错误")
             raise
+
+    def _handle_nonlinear_potential(self, processor, options, output_dir):
+        """处理非线性潜力评估模型"""
+        try:
+            start_time = time.time()
+            
+            # 添加数据字段检查
+            self.stdout.write(f"- 原始数据字段: {', '.join(processor.data.columns)}")
+            
+            # 直接创建非线性学习潜力评估器
+            self.stdout.write("- 初始化NonlinearStudentPotentialEvaluator...")
+            evaluator = NonlinearStudentPotentialEvaluator(
+                data=processor.data,
+                data_processor=processor,
+                baseline_exam=options.get('baseline')
+            )
+            
+            try:
+                # 使用模型自己的prepare_data方法
+                self.stdout.write("- 准备模型数据...")
+                prepared_data = evaluator.prepare_data()
+                self.stdout.write(f"- 找到{prepared_data['student_id'].nunique()}名有足够考试记录的学生用于潜力评估")
+                logger.info(f"找到{prepared_data['student_id'].nunique()}名有足够考试记录的学生")
+                
+                # 添加处理后的字段检查
+                self.stdout.write(f"- 处理后的数据字段: {', '.join(prepared_data.columns)}")
+            except ValueError as e:
+                self.stdout.write(self.style.ERROR(f"- 数据准备失败: {str(e)}"))
+                return
+            
+            # 评估潜力
+            potential_scores = evaluator.evaluate_potential()
+            self.stdout.write(f"- 完成{len(potential_scores)}名学生的潜力评估")
+            
+            # 分析成长模式
+            growth_patterns = evaluator.analyze_growth_patterns()
+            self.stdout.write(f"- 识别了{len(growth_patterns)}种不同的学习成长模式")
+            
+            # 处理输出
+            nonlinear_output_dir = os.path.join(output_dir, 'nonlinear_potential')
+            os.makedirs(nonlinear_output_dir, exist_ok=True)
+            
+            # 保存结果
+            potential_scores.to_csv(os.path.join(nonlinear_output_dir, 'potential_scores.csv'), index=False)
+            growth_patterns.to_csv(os.path.join(nonlinear_output_dir, 'growth_patterns.csv'), index=False)
+            
+            self.stdout.write(f"- 结果已保存至 {nonlinear_output_dir}")
+            
+            # 创建可视化器
+            visualizer = ValueAddedVisualizer()
+            
+            # 如果指定了学生ID，使用可视化器生成HTML报告
+            if options.get('student_id'):
+                student_id = options['student_id']
+                
+                # 尝试生成HTML报告
+                try:
+                    html_report = visualizer.generate_student_potential_report(
+                        evaluator, 
+                        student_id, 
+                        nonlinear_output_dir, 
+                        include_plots=True
+                    )
+                    
+                    if html_report.startswith("<h2>错误</h2>"):
+                        self.stdout.write(self.style.ERROR(f"- 无法生成学生 {student_id} 的报告，可能是数据不存在"))
+                    else:
+                        report_path = os.path.join(nonlinear_output_dir, f"{student_id}_potential_report.html")
+                        self.stdout.write(self.style.SUCCESS(f"- 已生成学生 {student_id} 的潜力评估HTML报告: {report_path}"))
+                        
+                        # 简要显示学生信息
+                        student_report = evaluator.get_student_report(student_id)
+                        if 'error' not in student_report:
+                            self.stdout.write(f"- 学生 {student_id} 基本信息:")
+                            for key in ['name', 'school', 'class', 'grade', 'potential_rating', 'growth_pattern', 'learning_phase']:
+                                if key in student_report:
+                                    self.stdout.write(f"  * {key}: {student_report[key]}")
+                except Exception as e:
+                    self.stdout.write(self.style.ERROR(f"- 生成HTML报告失败: {str(e)}"))
+                    logger.exception("生成HTML报告时出错")
+                    
+                    # 回退到简单文本报告
+                    student_report = evaluator.get_student_report(student_id)
+                    if 'error' in student_report:
+                        self.stdout.write(self.style.ERROR(f"- {student_report['error']}"))
+                    else:
+                        self.stdout.write(self.style.SUCCESS(f"- 学生 {student_id} 潜力评估报告:"))
+                        for key, value in student_report.items():
+                            if key not in ['scores_history', 'velocity_history', 'phase_recommendations']:
+                                self.stdout.write(f"  * {key}: {value}")
+                                
+                        self.stdout.write("  * 学习阶段建议:")
+                        for rec in student_report['phase_recommendations']:
+                            self.stdout.write(f"    - {rec}")
+            
+            fit_time = time.time() - start_time
+            self.stdout.write(self.style.SUCCESS(f"- 非线性潜力评估完成，用时: {fit_time:.2f}秒"))
+            
+        except Exception as e:
+            self.stdout.write(self.style.ERROR(f"- 非线性潜力评估失败: {str(e)}"))
+            logger.exception("非线性潜力评估出错")
+
+    def _handle_tvam_model(self, processor, options, output_dir):
+        """
+        处理传统增值模型(TVAM)分析
+        
+        执行TVAM模型的构建、拟合和评估，生成各种报告和可视化
+        
+        Args:
+            processor: 数据处理器实例
+            options: 命令行选项
+            output_dir: 输出目录
+        """
+        try:
+            start_time = time.time()
+            
+            # 创建TVAM模型实例
+            tvam_model = TVAMValueAddedModel(
+                data=processor.data,
+                data_processor=processor,
+                entity_type=options['entity'],
+                covariates=options['control'],
+                use_cohort=options['cohort'],
+                baseline_exam=options.get('baseline')
+            )
+            
+            # 准备数据
+            try:
+                prepared_data = tvam_model.prepare_data()
+                self.stdout.write(f"- 为TVAM模型准备了{len(prepared_data)}条建模数据")
+                
+                # 显示数据统计信息
+                n_schools = prepared_data['school_id'].nunique() if 'school_id' in prepared_data.columns else 0
+                n_classes = prepared_data['class_id'].nunique() if 'class_id' in prepared_data.columns else 0
+                n_students = prepared_data['student_id'].nunique() if 'student_id' in prepared_data.columns else 0
+                
+                self.stdout.write(f"  * 包含 {n_schools} 所学校, {n_classes} 个班级, {n_students} 名学生")
+            except ValueError as e:
+                self.stdout.write(self.style.ERROR(f"- TVAM数据准备失败: {str(e)}"))
+                return
+            
+            # 拟合模型
+            tvam_model.fit()
+            self.stdout.write("- TVAM模型拟合完成")
+            
+            # 获取效果估计
+            entity_type = options['entity']
+            effect_estimates = tvam_model.get_effect_estimates()
+            self.stdout.write(f"- 获取了 {len(effect_estimates)} 个{entity_type}的增值效果估计")
+            
+            # 获取模型评估指标
+            metrics = tvam_model.evaluate_model()
+            self.stdout.write("- 模型评估指标:")
+            for metric, value in metrics.items():
+                self.stdout.write(f"  * {metric}: {value:.4f}")
+            
+            # 处理输出
+            tvam_output_dir = os.path.join(output_dir, 'tvam')
+            os.makedirs(tvam_output_dir, exist_ok=True)
+            
+            # 保存效果估计结果
+            effect_estimates.to_csv(os.path.join(tvam_output_dir, f'{entity_type}_effects.csv'), index=False)
+            
+            # 保存学生级预测和残差
+            student_results = tvam_model.get_student_results()
+            if student_results is not None:
+                student_results.to_csv(os.path.join(tvam_output_dir, 'student_results.csv'), index=False)
+                self.stdout.write(f"- 保存了 {len(student_results)} 名学生的预测结果")
+            
+            # 创建可视化
+            try:
+                visualizer = ValueAddedVisualizer()
+                
+                # 生成增值效果排名图
+                rank_plot_path = os.path.join(tvam_output_dir, f'{entity_type}_ranks.png')
+                visualizer.plot_effect_ranks(effect_estimates, entity_type, 
+                                            output_path=rank_plot_path)
+                self.stdout.write(f"- 生成了{entity_type}增值效果排名图")
+                
+                # 生成残差分析图
+                if student_results is not None and 'residual' in student_results.columns:
+                    residual_plot_path = os.path.join(tvam_output_dir, 'residual_analysis.png')
+                    visualizer.plot_residual_analysis(student_results, 
+                                                    output_path=residual_plot_path)
+                    self.stdout.write("- 生成了模型残差分析图")
+                
+                # 如果指定了特定实体(如班级或学校)，生成详细报告
+                if options.get('entity_id'):
+                    entity_id = options['entity_id']
+                    entity_report_path = os.path.join(tvam_output_dir, f'{entity_id}_report.html')
+                    
+                    report_html = visualizer.generate_entity_report(
+                        tvam_model, 
+                        entity_id,
+                        entity_type,
+                        output_path=entity_report_path
+                    )
+                    
+                    self.stdout.write(f"- 生成了{entity_type} {entity_id}的详细分析报告")
+            except Exception as viz_error:
+                self.stdout.write(self.style.WARNING(f"- 生成可视化时出错: {str(viz_error)}"))
+                logger.exception("生成TVAM可视化时出错")
+            
+            self.stdout.write(f"- 结果已保存至 {tvam_output_dir}")
+            
+            fit_time = time.time() - start_time
+            self.stdout.write(self.style.SUCCESS(f"- TVAM模型分析完成，用时: {fit_time:.2f}秒"))
+            
+        except Exception as e:
+            self.stdout.write(self.style.ERROR(f"- TVAM模型分析失败: {str(e)}"))
+            logger.exception("TVAM模型分析过程中发生错误")

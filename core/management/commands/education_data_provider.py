@@ -128,11 +128,61 @@ class EducationDataProvider:
         data_df = self._clean_data(data_df)
         logger.info(f"数据清洗后剩余 {len(data_df)} 条记录")
         
+        # 步骤6: 修改获取学生姓名的逻辑 - 不再依赖self.student_ids
+        try:
+            # 获取所有相关学生的ID
+            student_ids = data_df['student_id'].unique().tolist()
+            
+            # 获取学生基本信息
+            students = Student.objects.filter(student_id__in=student_ids)
+            student_info = pd.DataFrame(list(students.values('student_id', 'name')))
+            
+            if not student_info.empty:
+                # 将name列重命名为student_name以便统一使用
+                student_info.rename(columns={'name': 'student_name'}, inplace=True)
+                
+                # 合并学生信息
+                data_df = pd.merge(
+                    data_df,
+                    student_info,
+                    on='student_id',
+                    how='left'
+                )
+                logger.info(f"已获取{len(student_info)}个学生的真实姓名")
+            else:
+                # 如果没有找到学生信息，使用默认名称
+                logger.warning("未从数据库找到学生名称信息，使用默认名称")
+                data_df['student_name'] = data_df['student_id'].apply(lambda x: f"学生{x}")
+        except Exception as e:
+            # 发生异常时使用默认名称
+            logger.warning(f"获取学生真实姓名失败: {str(e)}，使用默认名称")
+            data_df['student_name'] = data_df['student_id'].apply(lambda x: f"学生{x}")
+        
         # 缓存处理后的数据
         self._processed_df = data_df
+        
+        # 记录最终返回的数据字段
+        logger.info(f"EducationDataProvider.get_data返回的数据字段: {sorted(data_df.columns.tolist())}")
+        
+        # 显示前5条记录的摘要
+        if not data_df.empty:
+            sample_count = min(5, len(data_df))
+            logger.info(f"数据样例(前{sample_count}条记录):")
+            for i, row in data_df.head(sample_count).iterrows():
+                student_info = f"学生ID:{row.get('student_id')} "
+                student_info += f"姓名:{row.get('student_name', '未知')} "
+                
+                score_info = f"成绩:{row.get('standard_score', '未知')} "
+                exam_info = f"考试:{row.get('exam_id', '未知')} "
+                class_info = f"班级:{row.get('class_id', '未知')}"
+                
+                logger.info(f"  记录{i+1}: {student_info}{score_info}{exam_info}{class_info}")
+        else:
+            logger.warning("  没有数据记录可显示")
+        
         return data_df
     
-    def get_raw_data(self):
+    def _get_raw_data(self):
         """
         获取原始成绩数据（不含学生历史记录）
         
@@ -145,11 +195,12 @@ class EducationDataProvider:
         
         return self._scores_df
     
-    def get_student_details(self, include_info=True):
+    def _get_student_details(self, student_ids=None, include_info=True):
         """
         获取学生详细信息
         
         Args:
+            student_ids: list 要获取详情的学生ID列表，默认None表示使用所有已知学生
             include_info: bool 是否包含学生基本信息
             
         Returns:
@@ -157,22 +208,34 @@ class EducationDataProvider:
         """
         if self._processed_df is None:
             self.get_data()
-            
-        student_df = self._processed_df.copy()
         
-        if include_info and self.student_ids:
-            # 获取学生基本信息
-            students = Student.objects.filter(student_id__in=self.student_ids)
-            student_info = pd.DataFrame(list(students.values()))
-            
-            if not student_info.empty:
-                # 合并学生信息
-                student_df = pd.merge(
-                    student_df,
-                    student_info,
-                    on='student_id',
-                    how='left'
-                )
+        if student_ids is None:
+            # 如果没有提供学生ID，使用所有学生
+            student_ids = self._processed_df['student_id'].unique().tolist()
+        
+        # 过滤只包含指定学生的记录
+        student_df = self._processed_df[self._processed_df['student_id'].isin(student_ids)].copy()
+        
+        if include_info:
+            try:
+                # 获取学生基本信息
+                students = Student.objects.filter(student_id__in=student_ids)
+                student_info = pd.DataFrame(list(students.values('student_id', 'name')))
+                
+                if not student_info.empty:
+                    # 统一使用student_name作为学生姓名字段
+                    student_info.rename(columns={'name': 'student_name'}, inplace=True)
+                    
+                    # 合并学生信息
+                    student_df = pd.merge(
+                        student_df,
+                        student_info,
+                        on='student_id',
+                        how='left'
+                    )
+                    logger.info(f"获取了{len(student_info)}个学生的详细信息")
+            except Exception as e:
+                logger.warning(f"获取学生详细信息失败: {str(e)}")
         
         return student_df
     

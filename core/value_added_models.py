@@ -64,7 +64,7 @@ class ValueAddedDataProcessor:
     """
     增值分析数据处理器
     
-    提供数据获取、清洗、转换和准备的通用功能
+    提供数据获取、清洗、转换和准备的基础功能组件
     """
     
     def __init__(self, provider=None):
@@ -112,77 +112,6 @@ class ValueAddedDataProcessor:
         logger.info(f"加载了{len(self.data)}条数据")
         return self.data
     
-    def prepare_model_data(self, data=None):
-        """
-        准备建模数据
-        
-        处理包括:
-        - 计算前测成绩
-        - 创建分类索引
-        - 标准化分数
-        - 验证数据完整性
-        
-        Args:
-            data: 输入数据，如果为None则使用之前加载的数据
-            
-        Returns:
-            DataFrame: 准备好的建模数据
-        """
-        if data is None:
-            if self.data is None:
-                raise ValueError("请先加载数据或提供数据")
-            data = self.data
-            
-        # 前测后测处理 - 传递baseline_exam参数
-        baseline_exam = getattr(self, 'baseline_exam', None)
-        model_data = self._process_pre_post_tests(data, baseline_exam=baseline_exam)
-        
-        # 处理缺失前测成绩的情况
-        missing_prior = model_data['prior_score'].isna().sum()
-        if missing_prior > 0:
-            logger.warning(f"有{missing_prior}条数据缺少前测成绩，这些记录将被过滤")
-            model_data = model_data.dropna(subset=['prior_score'])
-            logger.info(f"过滤后剩余{len(model_data)}条有效数据")
-        
-        # 【新增代码】移除前测考试记录
-        if baseline_exam:
-            # 如果指定了基准考试，移除该考试的记录
-            pre_test_count = model_data[model_data['exam_id'] == baseline_exam].shape[0]
-            model_data = model_data[model_data['exam_id'] != baseline_exam]
-            logger.info(f"已移除{pre_test_count}条前测考试记录(exam_id={baseline_exam})，剩余{len(model_data)}条记录")
-        elif 'time_point' in model_data.columns:
-            # 如果使用第一次考试作为前测，移除所有time_point=1的记录
-            pre_test_count = model_data[model_data['time_point'] == 1].shape[0]
-            model_data = model_data[model_data['time_point'] > 1]
-            logger.info(f"已移除{pre_test_count}条前测考试记录(第一次考试)，剩余{len(model_data)}条记录")
-        
-        # 创建数值索引
-        model_data = self._create_numeric_indices(model_data)
-        
-        # 标准化分数
-        #model_data = self._standardize_scores(model_data)
-        
-        # 添加学校和班级名称列
-        if 'school_id' in model_data.columns and 'school_idx' in model_data.columns:
-            model_data['school_name'] = model_data['school_id'].astype(str)
-        
-        # 确保学校名称正确
-        model_data = self._ensure_school_names(model_data)
-        
-        # 处理班级ID - 独立函数处理复杂逻辑
-        model_data = self._process_class_ids(model_data)
-        
-        # 生成友好的display_id
-        model_data = self._generate_display_ids(model_data)
-        
-        # 检查真实班级数量
-        if 'class_idx' in model_data.columns:
-            num_classes = model_data['class_idx'].nunique() 
-            logger.info(f"数据包含{num_classes}个班级")
-        
-        self.model_data = model_data
-        return model_data
-    
     def _process_pre_post_tests(self, data, baseline_exam=None):
         """
         处理前测和后测数据
@@ -227,6 +156,44 @@ class ValueAddedDataProcessor:
         prep_data = pd.merge(prep_data, prior_scores, on='student_id', how='left')
         
         return prep_data
+    
+    def _filter_pretest_data(self, data, baseline_exam=None):
+        """
+        处理前测相关的数据过滤
+        
+        包括：
+        - 过滤缺少前测成绩的记录
+        - 移除前测考试记录
+        
+        Args:
+            data: 数据框，包含前测成绩
+            baseline_exam: 基准考试ID，如果为None则使用时间点识别前测
+            
+        Returns:
+            DataFrame: 过滤后的数据框
+        """
+        model_data = data.copy()
+        
+        # 处理缺失前测成绩的情况
+        missing_prior = model_data['prior_score'].isna().sum()
+        if missing_prior > 0:
+            logger.warning(f"有{missing_prior}条数据缺少前测成绩，这些记录将被过滤")
+            model_data = model_data.dropna(subset=['prior_score'])
+            logger.info(f"过滤后剩余{len(model_data)}条有效数据")
+        
+        # 移除前测考试记录
+        if baseline_exam:
+            # 如果指定了基准考试，移除该考试的记录
+            pre_test_count = model_data[model_data['exam_id'] == baseline_exam].shape[0]
+            model_data = model_data[model_data['exam_id'] != baseline_exam]
+            logger.info(f"已移除{pre_test_count}条前测考试记录(exam_id={baseline_exam})，剩余{len(model_data)}条记录")
+        elif 'time_point' in model_data.columns:
+            # 如果使用第一次考试作为前测，移除所有time_point=1的记录
+            pre_test_count = model_data[model_data['time_point'] == 1].shape[0]
+            model_data = model_data[model_data['time_point'] > 1]
+            logger.info(f"已移除{pre_test_count}条前测考试记录(第一次考试)，剩余{len(model_data)}条记录")
+            
+        return model_data
     
     def _create_numeric_indices(self, data):
         """
@@ -600,6 +567,155 @@ class ValueAddedDataProcessor:
         
         return model_data
 
+    def _ensure_student_names(self, data):
+        """
+        确保学生姓名字段存在且正确
+        
+        如果student_name不存在，尝试从多种来源获取学生姓名信息
+        
+        Args:
+            data: 包含学生ID的数据框
+            
+        Returns:
+            DataFrame: 添加或更新了学生姓名的数据框
+        """
+        if 'student_name' in data.columns:
+            return data
+            
+        model_data = data.copy()
+        
+        if 'name' in model_data.columns:
+            # 如果数据中包含name字段，但没有student_name字段，将name映射为student_name
+            model_data['student_name'] = model_data['name']
+            logger.info("将name字段映射为student_name")
+        elif hasattr(self, 'provider') and self.provider:
+            # 如果有provider属性，尝试从provider获取学生信息
+            try:
+                student_ids = model_data['student_id'].unique().tolist()
+                
+                # 不传递include_info参数，依赖默认值
+                student_details = self.provider._get_student_details(student_ids)
+                
+                if student_details is not None and not student_details.empty:
+                    # 创建ID到姓名的映射
+                    name_mapping = dict(zip(
+                        student_details['student_id'].astype(str), 
+                        student_details['student_name']
+                    ))
+                    
+                    # 添加姓名字段
+                    model_data['student_name'] = model_data['student_id'].astype(str).map(
+                        name_mapping).fillna("未知学生")
+                    logger.info(f"从数据提供者获取了{len(name_mapping)}个学生的姓名信息")
+                else:
+                    model_data['student_name'] = model_data['student_id'].astype(str)
+                    logger.warning("无法从数据提供者获取学生姓名，使用学生ID作为姓名")
+            except Exception as e:
+                model_data['student_name'] = model_data['student_id'].astype(str)
+                logger.warning(f"获取学生姓名时出错: {str(e)}，使用学生ID作为姓名")
+        else:
+            # 如果没有其他来源，使用student_id作为student_name
+            model_data['student_name'] = model_data['student_id'].astype(str)
+            logger.warning("数据中缺少学生姓名信息，使用学生ID作为姓名")
+            
+        return model_data
+
+    # 添加一个数据处理工具集方法
+    def get_data_processors(self):
+        """
+        获取所有数据处理工具函数
+        
+        Returns:
+            dict: 包含所有处理函数的字典
+        """
+        return {
+            'process_pre_post_tests': self._process_pre_post_tests,
+            'filter_pretest_data': self._filter_pretest_data,
+            'create_numeric_indices': self._create_numeric_indices,
+            'standardize_scores': self._standardize_scores,
+            'ensure_school_names': self._ensure_school_names,
+            'process_class_ids': self._process_class_ids,
+            'generate_display_ids': self._generate_display_ids,
+            'ensure_student_names': self._ensure_student_names,
+            'validate_data': self._validate_data,
+            'ensure_class_names': self._ensure_class_names,
+            'ensure_grade_field': self._ensure_grade_field
+        }
+
+    # 在ValueAddedDataProcessor类中添加以下方法
+
+    def _ensure_class_names(self, df):
+        """
+        确保数据中包含班级名称
+        
+        从class_id或stable_class字段提取班级名称，
+        并添加class_name字段
+        
+        Args:
+            df: 输入数据框
+            
+        Returns:
+            DataFrame: 添加了class_name字段的数据框
+        """
+        if 'class_name' not in df.columns or df['class_name'].isnull().all():
+            logger.info("正在生成班级名称字段")
+            
+            if 'class_id' in df.columns:
+                # 使用_process_class_ids方法的逻辑提取班级名称
+                temp_df = self._process_class_ids(df.copy())
+                
+                # 如果_process_class_ids成功添加了class_name字段
+                if 'class_name' in temp_df.columns:
+                    logger.info("从class_id成功生成班级名称")
+                    df['class_name'] = temp_df['class_name']
+                else:
+                    # 简单提取班级编号作为备选方案
+                    logger.warning("使用备选方案从class_id提取班级名称")
+                    df['class_name'] = df['class_id'].apply(
+                        lambda x: f"{x.split('_')[1]}班" if isinstance(x, str) and '_' in x else '未知'
+                    )
+            elif 'stable_class' in df.columns:
+                df['class_name'] = df['stable_class'].apply(
+                    lambda x: f"{x}班" if isinstance(x, str) else '未知'
+                )
+            else:
+                logger.warning("找不到班级相关字段，无法生成班级名称")
+                df['class_name'] = '未知'
+        
+        return df
+
+    def _ensure_grade_field(self, df):
+        """
+        确保数据中包含年级字段
+        
+        从class_id或grade_id字段提取年级信息
+        
+        Args:
+            df: 输入数据框
+            
+        Returns:
+            DataFrame: 添加了grade字段的数据框
+        """
+        if 'grade' not in df.columns or df['grade'].isnull().all():
+            logger.info("正在生成年级字段")
+            
+            if 'grade_id' in df.columns:
+                df['grade'] = df['grade_id'].apply(
+                    lambda x: f"{x.split('_')[1]}年级" if isinstance(x, str) and '_' in x else '未知'
+                )
+            elif 'class_id' in df.columns:
+                # 从班级ID提取年级信息 (假设格式为C01_71_232，其中7表示年级)
+                df['grade'] = df['class_id'].apply(
+                    lambda x: f"{x.split('_')[1][0]}年级" if isinstance(x, str) and '_' in x 
+                              and len(x.split('_')) > 1 and x.split('_')[1] 
+                              and x.split('_')[1][0].isdigit() else '未知'
+                )
+            else:
+                logger.warning("找不到年级相关字段，无法生成年级信息")
+                df['grade'] = '未知'
+        
+        return df
+
 #############################################
 # 第二部分: 模型基类
 #############################################
@@ -611,32 +727,84 @@ class BaseValueAddedModel(ABC):
     为所有增值模型提供通用接口和基础功能
     """
     
-    def __init__(self, data=None):
+    def __init__(self, data=None, data_processor=None):
         """
         初始化模型
         
         Args:
-            data: 建模数据DataFrame
+            data: 原始数据DataFrame
+            data_processor: 数据处理器实例
         """
-        self.data = data
+        self.raw_data = data
+        self.data = None  # 处理后的建模数据
+        self.data_processor = data_processor or ValueAddedDataProcessor()
         self.model = None
         self.metrics = {}
         self.result = None
+    
+    def prepare_data(self, data=None):
+        """
+        准备模型所需数据
+        
+        子类应该重写此方法以实现特定的数据处理逻辑
+        
+        Args:
+            data: 输入数据，如果为None则使用初始化时的数据
+            
+        Returns:
+            DataFrame: 准备好的建模数据
+        """
+        if data is not None:
+            self.raw_data = data
+            
+        if self.raw_data is None:
+            raise ValueError("请提供数据")
+            
+        # 获取数据处理工具
+        processors = self.data_processor.get_data_processors()
+        
+        # 基本数据处理流程 - 子类可重写此方法
+        baseline_exam = getattr(self.data_processor, 'baseline_exam', None)
+        
+        # 前测后测处理
+        model_data = processors['process_pre_post_tests'](self.raw_data, baseline_exam)
+        
+        # 过滤前测数据
+        model_data = processors['filter_pretest_data'](model_data, baseline_exam)
+        
+        # 创建数值索引
+        model_data = processors['create_numeric_indices'](model_data)
+        
+        # 确保学生和学校名称
+        model_data = processors['ensure_school_names'](model_data)
+        model_data = processors['ensure_student_names'](model_data)
+        
+        # 处理班级ID
+        model_data = processors['process_class_ids'](model_data)
+        
+        # 生成友好ID
+        model_data = processors['generate_display_ids'](model_data)
+        
+        # 保存处理后的数据
+        self.data = model_data
+        return model_data
+        
     def fit(self, data=None):
         """
         拟合模型
         
         Args:
-            data: 建模数据，如果为None则使用初始化时的数据
+            data: 原始数据，如果为None则使用初始化时的数据
             
         Returns:
             self: 支持链式调用
         """
         if data is not None:
-            self.data = data
+            self.raw_data = data
         
+        # 准备数据
         if self.data is None:
-            raise ValueError("请提供建模数据")
+            self.prepare_data()
         
         self._validate_data()
         self._build_model()
@@ -826,13 +994,10 @@ class ValueAddedVisualizer:
         schools = self.result['schools']
         classes = self.result['classes']
         
-        # 通过合并数据准备绘图数据
-        # 这里需要具体的数据结构来实现
-        # ...
+   
         
         plt.figure(figsize=(12, 8))
-        # 实现绘图代码
-        # ...
+
         plt.title('School-Class Value-Added Relationship')
         plt.xlabel('School Value-Added')
         plt.ylabel('Class Value-Added')
@@ -1005,6 +1170,325 @@ class ValueAddedVisualizer:
                 saved_paths[f"{level}_csv"] = csv_path
         
         return saved_paths
+
+    # 在ValueAddedVisualizer类中添加展示非线性潜力评估结果的方法
+
+    def visualize_student_potential(self, evaluator, student_id=None, output_dir=None, show_plots=True):
+        """
+        可视化学生潜力评估结果
+        
+        Args:
+            evaluator: NonlinearStudentPotentialEvaluator实例
+            student_id: 指定学生ID，如果为None则显示总体分布
+            output_dir: 输出目录，如果为None则不保存图表
+            show_plots: 是否显示图表
+            
+        Returns:
+            dict: 包含图表对象的字典
+        """
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        
+        # 确保评估已完成
+        if evaluator.potential_scores is None:
+            evaluator.evaluate_potential()
+        
+        if evaluator.growth_patterns is None:
+            evaluator.analyze_growth_patterns()
+        
+        # 创建保存图表的字典
+        plots = {}
+        
+        # 设置图表样式
+        plt.style.use('seaborn-whitegrid')
+        sns.set_palette('muted')
+        
+        # 1. 潜力分数分布图
+        fig1, ax1 = plt.subplots(figsize=(10, 6))
+        sns.histplot(evaluator.potential_scores['potential_score_norm'], 
+                    bins=20, kde=True, ax=ax1)
+        ax1.set_title('学生潜力分数分布')
+        ax1.set_xlabel('潜力分数')
+        ax1.set_ylabel('学生数量')
+        # 如果指定了学生，在图上标记该学生位置
+        if student_id:
+            student_score = evaluator.potential_scores[
+                evaluator.potential_scores['student_id'] == student_id
+            ]['potential_score_norm'].values
+            if len(student_score) > 0:
+                ax1.axvline(student_score[0], color='red', linestyle='--', 
+                           label=f'学生 {student_id}')
+                ax1.legend()
+        plots['potential_distribution'] = fig1
+        
+        # 2. 潜力评级分布图
+        fig2, ax2 = plt.subplots(figsize=(10, 6))
+        rating_counts = evaluator.potential_scores['potential_rating'].value_counts().sort_index()
+        sns.barplot(x=rating_counts.index, y=rating_counts.values, ax=ax2)
+        ax2.set_title('学生潜力评级分布')
+        ax2.set_xlabel('潜力评级')
+        ax2.set_ylabel('学生数量')
+        # 如果指定了学生，高亮该学生评级
+        if student_id:
+            student_rating = evaluator.potential_scores[
+                evaluator.potential_scores['student_id'] == student_id
+            ]['potential_rating'].values
+            if len(student_rating) > 0:
+                rating_idx = list(rating_counts.index).index(student_rating[0])
+                ax2.patches[rating_idx].set_facecolor('red')
+                ax2.text(rating_idx, 
+                        rating_counts[student_rating[0]] / 2, 
+                        f'学生\n{student_id}', 
+                        ha='center',
+                        color='white',
+                        fontweight='bold')
+        plots['rating_distribution'] = fig2
+        
+        # 3. 成长模式分布图
+        fig3, ax3 = plt.subplots(figsize=(12, 6))
+        pattern_counts = evaluator.growth_patterns['growth_pattern'].value_counts()
+        sns.barplot(x=pattern_counts.index, y=pattern_counts.values, ax=ax3)
+        ax3.set_title('学习成长模式分布')
+        ax3.set_xlabel('成长模式')
+        ax3.set_ylabel('学生数量')
+        ax3.set_xticklabels(ax3.get_xticklabels(), rotation=45, ha='right')
+        # 如果指定了学生，高亮该学生模式
+        if student_id:
+            student_pattern = evaluator.growth_patterns[
+                evaluator.growth_patterns['student_id'] == student_id
+            ]['growth_pattern'].values
+            if len(student_pattern) > 0:
+                pattern_idx = list(pattern_counts.index).index(student_pattern[0])
+                ax3.patches[pattern_idx].set_facecolor('red')
+                ax3.text(pattern_idx, 
+                        pattern_counts[student_pattern[0]] / 2, 
+                        f'学生\n{student_id}', 
+                        ha='center',
+                        color='white', 
+                        fontweight='bold')
+        plots['pattern_distribution'] = fig3
+        
+        # 4. 如果指定了学生ID，绘制该学生成绩曲线
+        if student_id:
+            report = evaluator.get_student_report(student_id)
+            if 'error' not in report:
+                # 获取成绩历史
+                scores_history = np.array(report['scores_history'])
+                x = np.arange(len(scores_history))
+                
+                fig4, ax4 = plt.subplots(figsize=(12, 6))
+                ax4.plot(scores_history[:, 0], scores_history[:, 1], 'o-', 
+                        label='实际成绩')
+                ax4.set_title(f'学生 {student_id} 成绩曲线与成长模式')
+                ax4.set_xlabel('考试ID')
+                ax4.set_ylabel('标准分数')
+                
+                # 添加成长模式信息
+                if report['best_growth_model'] != '数据不足':
+                    model_info = (f"最佳拟合模型: {report['best_growth_model']}\n"
+                                 f"成长模式: {report['growth_pattern']}\n"
+                                 f"拟合度: {report['model_fit_quality']:.2f}")
+                    ax4.text(0.02, 0.05, model_info, 
+                            transform=ax4.transAxes,
+                            bbox=dict(facecolor='white', alpha=0.7))
+                
+                # 添加潜力评估信息
+                potential_info = (f"潜力评级: {report['potential_rating']}\n"
+                                 f"学习阶段: {report['learning_phase']}")
+                ax4.text(0.02, 0.85, potential_info, 
+                        transform=ax4.transAxes,
+                        bbox=dict(facecolor='white', alpha=0.7))
+                
+                plots['student_curve'] = fig4
+        
+        # 保存图表
+        if output_dir:
+            import os
+            os.makedirs(output_dir, exist_ok=True)
+            
+            for name, fig in plots.items():
+                filename = f"{name}.png"
+                if student_id:
+                    filename = f"{student_id}_{name}.png"
+                fig.savefig(os.path.join(output_dir, filename), dpi=100, bbox_inches='tight')
+        
+        # 显示图表
+        if show_plots:
+            plt.show()
+        else:
+            plt.close('all')
+        
+        return plots
+
+    def generate_student_potential_report(self, evaluator, student_id, output_dir=None, include_plots=True):
+        """
+        生成学生潜力评估报告
+        
+        Args:
+            evaluator: NonlinearStudentPotentialEvaluator实例
+            student_id: 学生ID
+            output_dir: 输出目录，如果不为None则保存报告
+            include_plots: 是否包含可视化图表
+            
+        Returns:
+            str: HTML格式的报告内容
+        """
+        # 获取学生报告
+        report = evaluator.get_student_report(student_id)
+        
+        if 'error' in report:
+            return f"<h2>错误</h2><p>{report['error']}</p>"
+        
+        # 准备报告模板
+        html = f"""
+        <!DOCTYPE html>
+        <html lang="zh-CN">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>学生 {student_id} 潜力评估报告</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 1000px; margin: 0 auto; padding: 20px; }}
+                h1, h2, h3 {{ color: #2c3e50; }}
+                .card {{ border: 1px solid #ddd; border-radius: 8px; padding: 15px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                .rating {{ font-size: 24px; font-weight: bold; }}
+                .rating-A-plus {{ color: #1e88e5; }}
+                .rating-A {{ color: #43a047; }}
+                .rating-B {{ color: #7cb342; }}
+                .rating-C {{ color: #ffb300; }}
+                .rating-D {{ color: #e53935; }}
+                .rating-E {{ color: #d32f2f; }}
+                .info-row {{ display: flex; flex-wrap: wrap; }}
+                .info-item {{ flex: 1; min-width: 200px; margin: 5px; }}
+                .recommendations {{ background-color: #f5f5f5; padding: 10px; border-radius: 5px; }}
+                .plot-container {{ text-align: center; margin: 20px 0; }}
+                .plot-container img {{ max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px; }}
+            </style>
+        </head>
+        <body>
+            <h1>学生潜力评估报告</h1>
+            
+            <div class="card">
+                <h2>基本信息</h2>
+                <div class="info-row">
+                    <div class="info-item">
+                        <p><strong>学生ID:</strong> {report['student_id']}</p>
+                        <p><strong>姓名:</strong> {report['name']}</p>
+                    </div>
+                    <div class="info-item">
+                        <p><strong>学校:</strong> {report['school']}</p>
+                        <p><strong>班级:</strong> {report['class']}</p>
+                        <p><strong>年级:</strong> {report['grade']}</p>
+                    </div>
+                    <div class="info-item">
+                        <p><strong>考试次数:</strong> {report['exam_count']}</p>
+                        <p><strong>起始成绩:</strong> {report['first_score']:.1f}</p>
+                        <p><strong>最新成绩:</strong> {report['latest_score']:.1f}</p>
+                        <p><strong>总成长:</strong> {report['total_growth']:.1f}</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>潜力评估</h2>
+                <div class="info-row">
+                    <div class="info-item">
+                        <p><strong>潜力分数:</strong> {report['potential_score']:.1f}</p>
+                        <p><strong>潜力评级:</strong> <span class="rating rating-{report['potential_rating'].replace('+', '-plus')}">{report['potential_rating']}</span></p>
+                    </div>
+                    <div class="info-item">
+                        <p><strong>成长模式:</strong> {report['growth_pattern']}</p>
+                        <p><strong>最佳拟合模型:</strong> {report['best_growth_model']}</p>
+                        <p><strong>模型拟合度:</strong> {report['model_fit_quality']:.2f if report['model_fit_quality'] is not None else '未知'}</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>学习指标</h2>
+                <div class="info-row">
+                    <div class="info-item">
+                        <p><strong>平均成长率:</strong> {report['avg_growth_rate']:.2f if report['avg_growth_rate'] is not None else '未知'}</p>
+                        <p><strong>近期势头:</strong> {report['momentum']:.2f if report['momentum'] is not None else '未知'}</p>
+                    </div>
+                    <div class="info-item">
+                        <p><strong>突破次数:</strong> {report['breakthrough_count']}</p>
+                        <p><strong>韧性指数:</strong> {report['resilience']:.2f if report['resilience'] is not None else '未知'}</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>学习阶段分析</h2>
+                <p><strong>当前学习阶段:</strong> {report['learning_phase']}</p>
+                <div class="recommendations">
+                    <h3>学习建议:</h3>
+                    <ul>
+                        {''.join(f"<li>{rec}</li>" for rec in report['phase_recommendations'])}
+                    </ul>
+                </div>
+            </div>
+        """
+        
+        # 如果包含图表并且指定了输出目录
+        if include_plots and output_dir:
+            # 生成并保存图表
+            plots = self.visualize_student_potential(evaluator, student_id, output_dir, show_plots=False)
+            
+            # 添加图表到报告
+            html += """
+            <div class="card">
+                <h2>可视化分析</h2>
+            """
+            
+            # 添加各图表
+            if 'student_curve' in plots:
+                img_path = f"{student_id}_student_curve.png"
+                html += f"""
+                <div class="plot-container">
+                    <h3>学习曲线分析</h3>
+                    <img src="{img_path}" alt="学习曲线">
+                </div>
+                """
+                
+            if 'potential_distribution' in plots:
+                img_path = f"{student_id}_potential_distribution.png"
+                html += f"""
+                <div class="plot-container">
+                    <h3>潜力分数分布</h3>
+                    <img src="{img_path}" alt="潜力分数分布">
+                </div>
+                """
+                
+            if 'rating_distribution' in plots:
+                img_path = f"{student_id}_rating_distribution.png"
+                html += f"""
+                <div class="plot-container">
+                    <h3>潜力评级分布</h3>
+                    <img src="{img_path}" alt="潜力评级分布">
+                </div>
+                """
+                
+            html += """
+            </div>
+            """
+        
+        # 结束HTML
+        html += """
+        </body>
+        </html>
+        """
+        
+        # 保存报告
+        if output_dir:
+            import os
+            os.makedirs(output_dir, exist_ok=True)
+            
+            report_path = os.path.join(output_dir, f"{student_id}_potential_report.html")
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(html)
+        
+        return html
 
 #############################################
 # 第四部分: 模型实现
@@ -1943,39 +2427,56 @@ class RandomEffectsValueAddedModel(BaseValueAddedModel):
         return entity_effects
     
 class TVAMValueAddedModel(BaseValueAddedModel):
-    """
-    传统增值评估模型 (TVAM) 实现
+    """传统增值评估模型(TVAM)实现"""
     
-    基于简单的线性回归残差方法，为每个实体计算观测值与预期值之间的差异。
-    该模型简单直观，但可能无法充分处理数据的层次结构。
-    
-    Args:
-        data: 建模数据
-        covariates: 控制变量列表
-        entity_type: 实体类型，'class'或'school'
-        use_cohort: 是否使用学生队列进行跨年级分析
-    """
-    
-    def __init__(self, data=None, covariates=None, entity_type='class', use_cohort=False):
+    def prepare_data(self, data=None):
         """
-        初始化TVAM模型
+        准备TVAM模型特定的数据
+        
+        处理包括:
+        - 计算前测成绩
+        - 创建分类索引
+        - 标准化分数
+        - 验证数据完整性
         
         Args:
-            data: 建模数据
-            covariates: 控制变量列表
-            entity_type: 实体类型，'class'或'school'
-            use_cohort: 是否使用学生队列进行跨年级分析
+            data: 输入数据，如果为None则使用初始化时的数据
+            
+        Returns:
+            DataFrame: 准备好的建模数据
         """
-        super().__init__(data)
-        self.covariates = covariates or []
-        self.entity_type = entity_type
-        self.use_cohort = use_cohort
-        self.mappings = {
-            'schools': {},
-            'classes': {},
-            'teachers': {},
-            'students': {}
-        }
+        # 首先调用基类的prepare_data获取基础处理后的数据
+        # 这已经包含了前测后测处理、过滤前测数据、创建数值索引等通用步骤
+        model_data = super().prepare_data(data)
+        
+        # 获取数据处理工具
+        processors = self.data_processor.get_data_processors()
+        
+        # 显示处理前的数据信息
+        logger.info(f"TVAM模型准备数据，接收的数据字段: {sorted(model_data.columns.tolist())}")
+        logger.info(f"数据样本（前3行）:\n{model_data.head(3)}")
+        
+
+        
+        # 检查真实班级数量（TVAM特别关注）
+        if 'class_idx' in model_data.columns:
+            num_classes = model_data['class_idx'].nunique() 
+            logger.info(f"TVAM模型数据包含{num_classes}个班级")
+        
+        # TVAM特定的其他处理
+        # 例如，计算班级平均成绩作为协变量
+        if 'class_idx' in model_data.columns and 'prior_score' in model_data.columns:
+            class_means = model_data.groupby('class_idx')['prior_score'].mean().reset_index()
+            class_means.columns = ['class_idx', 'class_mean_prior']
+            model_data = pd.merge(model_data, class_means, on='class_idx', how='left')
+            logger.info("已添加班级平均前测成绩作为协变量")
+        
+        # 在方法结束前记录日志
+        logger.info(f"TVAM模型准备完成，数据字段: {sorted(model_data.columns.tolist())}")
+        
+        # 保存处理后的数据
+        self.data = model_data
+        return model_data
     
     def _validate_data(self):
         """
@@ -2230,3 +2731,801 @@ def verify_excel_file(file_path):
     except Exception as e:
         logger.error(f"Excel文件验证失败: {str(e)}")
         return False
+
+class NonlinearStudentPotentialEvaluator(BaseValueAddedModel):
+    """
+    非线性学习潜力评估器
+    
+    通过识别学生的非线性学习曲线特征评估其学习潜力
+    
+    Args:
+        data: 包含学生成绩数据的DataFrame
+        baseline_exam: 基准考试ID(可选)
+    """
+    
+    def __init__(self, data=None, data_processor=None, baseline_exam=None):
+        """初始化非线性潜力评估器"""
+        super().__init__(data, data_processor)
+        self.baseline_exam = baseline_exam
+        self.potential_scores = None
+        self.growth_patterns = None
+    
+    def prepare_data(self, data=None):
+        """
+        准备非线性潜力分析所需的数据
+        
+        Args:
+            data: 输入数据，如果为None则使用初始化时的数据
+            
+        Returns:
+            DataFrame: 处理后的数据
+        
+        Raises:
+            ValueError: 当数据不符合要求或无法处理时
+        """
+        # 修复数据处理逻辑
+        if data is not None:
+            self.data = data.copy()  # 使用提供的数据
+        elif self.data is None:
+            # 如果self.data为None，尝试从数据处理器获取
+            if hasattr(self, 'data_processor') and self.data_processor is not None:
+                logger.info("从数据处理器获取数据")
+                self.data = self.data_processor.data.copy()
+                
+        # 现在进行数据验证
+        if self.data is None or len(self.data) == 0:
+            logger.error("NonlinearStudentPotentialEvaluator没有可用数据")
+            raise ValueError("没有可用数据进行潜力评估")
+        
+        # 获取数据处理器功能 - 添加此行
+        processors = self.data_processor.get_data_processors()
+        
+        # 记录数据状态  
+        logger.info(f"准备非线性潜力评估数据: {len(self.data)}条记录，字段: {sorted(self.data.columns.tolist())}")
+            
+        # 确保所需字段存在
+        required_fields = ['student_id', 'exam_id', 'standard_score']
+        missing_fields = [f for f in required_fields if f not in self.data.columns]
+        if missing_fields:
+            error_msg = f"数据缺少必要字段: {missing_fields}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+
+        
+        # 3. 检查数据完整性 - 添加警告
+        all_exam_ids = sorted(self.data['exam_id'].unique())
+        logger.info(f"数据中包含以下考试: {all_exam_ids}")
+        
+        # 检查每个学生的考试记录完整性
+        student_exam_counts = self.data.groupby('student_id')['exam_id'].nunique()
+        complete_students = student_exam_counts[student_exam_counts == len(all_exam_ids)].index
+        incomplete_students = student_exam_counts[student_exam_counts < len(all_exam_ids)].index
+        
+        if len(incomplete_students) > 0:
+            logger.warning(f"发现{len(incomplete_students)}名学生的考试记录不完整，可能影响分析结果的准确性")
+            
+            # 统计不同考试次数的学生人数
+            count_distribution = student_exam_counts.value_counts().sort_index()
+            for count, num_students in count_distribution.items():
+                logger.info(f"参加了{count}次考试的学生数: {num_students}")
+        
+        # 4. 非线性评估特有的处理：仅保留参加全部考试的学生
+        all_exams = sorted(self.data['exam_id'].unique())
+        total_exams = len(all_exams)
+        logger.info(f"数据中包含 {total_exams} 次考试: {all_exams}")
+
+        # 计算每个学生参加的考试次数
+        student_exam_counts = self.data.groupby('student_id')['exam_id'].nunique()
+
+        # 只保留参加全部考试的学生
+        complete_students = student_exam_counts[student_exam_counts == total_exams].index
+        incomplete_students = student_exam_counts[student_exam_counts < total_exams].index
+
+        # 记录统计信息
+        logger.info(f"参加全部 {total_exams} 次考试的学生: {len(complete_students)}人")
+        logger.info(f"未参加全部考试的学生: {len(incomplete_students)}人 (这些学生将被排除在分析之外)")
+
+        # 筛选数据
+        self.data = self.data[self.data['student_id'].isin(complete_students)]
+
+        if len(self.data) == 0:
+            raise ValueError(f"没有学生参加了全部 {total_exams} 次考试，无法进行非线性潜力评估")
+
+        # 确保总考试次数至少为3
+        if total_exams < 3:
+            raise ValueError(f"总考试次数({total_exams})少于3次，无法进行非线性潜力评估")
+        
+        # 5. 确保考试时间序列的一致性
+        if 'exam_date' in self.data.columns:
+            # 按日期排序考试
+            exam_dates = self.data.groupby('exam_id')['exam_date'].first().sort_values()
+            exam_order = {exam: i for i, exam in enumerate(exam_dates.index)}
+            self.data['exam_order'] = self.data['exam_id'].map(exam_order)
+        else:
+            # 如果没有日期，假设考试ID已经按时间顺序编号
+            exam_ids = sorted(self.data['exam_id'].unique())
+            exam_order = {exam: i for i, exam in enumerate(exam_ids)}
+            self.data['exam_order'] = self.data['exam_id'].map(exam_order)
+        
+        # 按学生ID和考试顺序排序
+        self.data = self.data.sort_values(['student_id', 'exam_order'])
+        
+        # 6. 确保必要的名称字段（使用处理器功能）
+        self.data = processors['ensure_student_names'](self.data)
+        self.data = processors['ensure_school_names'](self.data)
+        self.data = processors['ensure_class_names'](self.data)
+        self.data = processors['ensure_grade_field'](self.data)
+        
+        # 7. 提取非线性特征
+        self._extract_nonlinear_features()
+        
+        return self.data
+    
+    def _extract_nonlinear_features(self):
+        """提取非线性学习特征"""
+        # 按学生ID分组
+        for student_id, group in self.data.groupby('student_id'):
+            if len(group) < 3:
+                continue
+                
+            # 确保按考试顺序排序
+            group_sorted = group.sort_values('exam_id')
+            scores = group_sorted['standard_score'].values
+            
+            # 处理学生缺失的考试
+            total_exams = self.data['exam_order'].nunique()
+            actual_exams = group_sorted['exam_order'].nunique()
+            
+            if actual_exams < total_exams:
+                # 记录学生实际参加的考试
+                exams_taken = group_sorted['exam_id'].values
+                logger.debug(f"学生{student_id}只参加了{actual_exams}次考试: {exams_taken}")
+            
+            # 1. 计算二阶差分(加速度)
+            first_diffs = np.diff(scores)
+            self.data.loc[self.data['student_id'] == student_id, 'learning_velocity'] = \
+                np.pad(first_diffs, (0, 1), 'constant')
+                
+            # 处理缺测影响
+            if len(first_diffs) >= 2:
+                second_diffs = np.diff(first_diffs)
+                self.data.loc[self.data['student_id'] == student_id, 'learning_acceleration'] = \
+                    np.pad(second_diffs, (0, 2), 'constant')
+            else:
+                # 如果差分数据不足，填充0
+                self.data.loc[self.data['student_id'] == student_id, 'learning_acceleration'] = 0
+                
+            # 2. 识别平台期(连续两次考试变化小于阈值)
+            is_plateau = np.abs(first_diffs) < 2.0
+            plateau_periods = np.pad(is_plateau, (0, 1), 'constant')
+            self.data.loc[self.data['student_id'] == student_id, 'in_plateau'] = plateau_periods
+            
+            # 3. 识别突破期(大幅提升)
+            is_breakthrough = first_diffs > 5.0
+            breakthrough_periods = np.pad(is_breakthrough, (0, 1), 'constant')
+            self.data.loc[self.data['student_id'] == student_id, 'breakthrough'] = breakthrough_periods
+            
+            # 4. 计算近期势头(最近3次考试的趋势)
+            if len(scores) >= 3:
+                recent_trend = np.polyfit(range(3), scores[-3:], 1)[0]
+                self.data.loc[self.data['student_id'] == student_id, 'recent_momentum'] = recent_trend
+            else:
+                # 如果不足3次考试，使用所有可用数据
+                recent_trend = np.polyfit(range(len(scores)), scores, 1)[0] if len(scores) > 1 else 0
+                self.data.loc[self.data['student_id'] == student_id, 'recent_momentum'] = recent_trend
+    
+    # 覆盖基类方法，整合新架构
+    def fit(self, data=None):
+        """拟合模型"""
+        if data is not None:
+            self.prepare_data(data)
+        elif self.data is None and hasattr(self, 'raw_data') and self.raw_data is not None:
+            self.prepare_data(self.raw_data)
+            
+        # 执行非线性评估
+        self.evaluate_potential()
+        self.analyze_growth_patterns()
+        
+        return self
+    
+    # 覆盖基类方法，适配新架构
+    def _build_model(self):
+        """适配BaseValueAddedModel接口"""
+        # 非线性评估不需要传统模型构建
+        pass
+    
+    # 覆盖基类方法，适配新架构
+    def _fit_model(self):
+        """适配BaseValueAddedModel接口"""
+        # 执行非线性评估
+        self.evaluate_potential()
+        self.analyze_growth_patterns()
+    
+    # 覆盖基类方法，适配新架构
+    def get_results(self):
+        """获取评估结果"""
+        if self.potential_scores is None:
+            self.evaluate_potential()
+            
+        if self.growth_patterns is None:
+            self.analyze_growth_patterns()
+            
+        return {
+            'potential_scores': self.potential_scores,
+            'growth_patterns': self.growth_patterns
+        }
+    
+    # 保留所有原始方法，不做任何修改
+    def evaluate_potential(self):
+        """
+        评估学生的非线性潜力
+        
+        此方法实现完整的非线性潜力评估逻辑，包括突破识别和长期优势学生识别
+        
+        Returns:
+            DataFrame: 包含潜力评估结果的数据框
+        """
+        if self.data is None:
+            self.prepare_data()
+            
+        # 1. 获取所有学生ID
+        student_ids = self.data['student_id'].unique()
+        
+        # 2. 初始化结果列表
+        potential_scores = []
+        
+        # 3. 对每个学生计算潜力分数
+        for student_id in student_ids:
+            result = self._calculate_student_potential(student_id)
+            potential_scores.append(result)
+            
+        # 4. 将结果转换为DataFrame
+        self.potential_scores = pd.DataFrame(potential_scores)
+        
+        # 5. 添加学生的基本信息
+        student_info = self.data.drop_duplicates('student_id')[['student_id', 'student_name', 'school_name']]
+        if 'class_name' in self.data.columns:
+            student_info = self.data.drop_duplicates('student_id')[['student_id', 'student_name', 'school_name', 'class_name']]
+        if 'grade' in self.data.columns:
+            student_info = self.data.drop_duplicates('student_id')[['student_id', 'student_name', 'school_name', 'class_name', 'grade']]
+            
+        self.potential_scores = pd.merge(
+            self.potential_scores,
+            student_info,
+            on='student_id',
+            how='left'
+        )
+        
+        # 6. 【新增】识别长期保持学科优势的学生
+        consistent_performers = self._identify_consistent_performers()
+        logger.info(f"长期保持优势的学生识别完成，结果包含 {len(consistent_performers)} 条记录")
+        
+        # 7. 【新增】合并长期优势学生结果
+        self.potential_scores = pd.merge(
+            self.potential_scores,
+            consistent_performers,
+            on='student_id',
+            how='left'
+        )
+        
+        # 8. 【新增】添加学生表现类型标签
+        self.potential_scores['performance_type'] = '未分类'
+        
+        # 长期优势型
+        mask = self.potential_scores['consistent_performer'] == True
+        self.potential_scores.loc[mask, 'performance_type'] = '长期优势型'
+        
+        # 突破成长型（高潜力但不是长期优势）
+        breakthrough_mask = (~self.potential_scores['consistent_performer']) & (self.potential_scores['potential_score'] > 75)
+        self.potential_scores.loc[breakthrough_mask, 'performance_type'] = '突破成长型'
+        
+        # 稳定型（中等潜力，非长期优势）
+        stable_mask = (~self.potential_scores['consistent_performer']) & (self.potential_scores['potential_score'].between(50, 75))
+        self.potential_scores.loc[stable_mask, 'performance_type'] = '稳定发展型'
+        
+        # 待发展型（低潜力）
+        developing_mask = (~self.potential_scores['consistent_performer']) & (self.potential_scores['potential_score'] < 50)
+        self.potential_scores.loc[developing_mask, 'performance_type'] = '待发展型'
+        
+        # 9. 修复第一行prepare_data中的方法名称错误
+        # self.data = processors['ensure_grade_names'](self.data) 应该改为：
+        # self.data = processors['ensure_grade_field'](self.data)
+        
+        logger.info(f"非线性潜力评估完成，结果包含 {len(self.potential_scores)} 条记录")
+        
+        # 规范化分数(添加到第5步末尾)
+        if not self.potential_scores.empty:
+            min_score = self.potential_scores['potential_score'].min()
+            max_score = self.potential_scores['potential_score'].max()
+            
+            # 避免除以零
+            score_range = max_score - min_score
+            if score_range > 0:
+                self.potential_scores['potential_score_norm'] = 100 * (self.potential_scores['potential_score'] - min_score) / score_range
+            else:
+                self.potential_scores['potential_score_norm'] = 50  # 如果所有分数相同
+                
+            # 评级
+            def assign_potential_rating(score):
+                if score >= 85: return 'A+'  # 优秀潜力
+                elif score >= 70: return 'A'  # 高潜力
+                elif score >= 55: return 'B'  # 良好潜力
+                elif score >= 40: return 'C'  # 中等潜力
+                elif score >= 25: return 'D'  # 需要关注
+                else: return 'E'  # 需要特别帮助
+                
+            self.potential_scores['potential_rating'] = self.potential_scores['potential_score_norm'].apply(assign_potential_rating)
+        
+        return self.potential_scores
+    
+    def analyze_growth_patterns(self):
+        """
+        使用非线性方法分析成长模式
+        
+        通过对学生成绩曲线拟合多种模型，确定最佳成长模式
+        
+        Returns:
+            DataFrame: 包含每个学生成长模式分析结果的数据框
+        """
+        growth_patterns = []  
+        
+        # 提前定义常量
+        MODEL_NAMES = ["线性成长", "加速/减速成长", "S型成长"]
+        PLATEAU_THRESHOLD = 2.0
+        BREAKTHROUGH_THRESHOLD = 5.0
+        
+        for student_id, group in self.data.groupby('student_id'):
+            if len(group) < 3:
+                continue
+                
+            # 提取学生基本信息
+            student_info = self._extract_student_info(group)
+            
+            # 提取并排序成绩
+            scores = group.sort_values('exam_id')['standard_score'].values
+            x = np.arange(len(scores))
+            
+            # 拟合多种模型并计算拟合度
+            model_results = self._fit_growth_models(x, scores)
+            
+            # 确定最佳拟合模型
+            best_model_idx = np.argmax([r['r2'] for r in model_results])
+            best_model = MODEL_NAMES[best_model_idx]
+            best_r2 = model_results[best_model_idx]['r2']
+            
+            # 分析波动模式
+            diffs = np.diff(scores)
+            volatility = np.std(diffs)
+            
+            # 识别平台和突破
+            has_plateau = np.any(np.abs(diffs) < PLATEAU_THRESHOLD)
+            has_breakthrough = np.any(diffs > BREAKTHROUGH_THRESHOLD)
+            
+            # 确定总体趋势方向
+            trend = "上升" if np.mean(diffs) > 0 else "下降" if np.mean(diffs) < 0 else "持平"
+            
+            # 确定成长模式类型
+            pattern = self._determine_growth_pattern(
+                best_model, 
+                volatility, 
+                has_plateau, 
+                has_breakthrough, 
+                trend,
+                model_results[1]['params'] if len(model_results) > 1 else None  # 二次模型参数
+            )
+            
+            # 添加到结果列表
+            growth_patterns.append({
+                **student_info,
+                'student_id': student_id,
+                'best_model': best_model,
+                'r_squared': best_r2,
+                'volatility': volatility,
+                'growth_pattern': pattern,
+                'has_plateau': has_plateau,
+                'has_breakthrough': has_breakthrough
+            })
+                
+        self.growth_patterns = pd.DataFrame(growth_patterns)
+        return self.growth_patterns
+    
+    def _extract_student_info(self, group):
+        """提取学生基本信息"""
+        return {
+            'student_name': group['student_name'].iloc[0] if 'student_name' in group.columns else "未知",
+            'school_name': group['school_name'].iloc[0] if 'school_name' in group.columns else "未知",
+            'class_name': group['class_name'].iloc[0] if 'class_name' in group.columns else "未知",
+            'grade': group['grade'].iloc[0] if 'grade' in group.columns else "未知"
+        }
+    
+    def _fit_growth_models(self, x, scores):
+        """拟合多种成长模型"""
+        results = []
+        
+        # 线性模型
+        linear_params = np.polyfit(x, scores, 1)
+        linear_r2 = self._r_squared(x, scores, np.poly1d(linear_params))
+        results.append({'type': 'linear', 'r2': linear_r2, 'params': linear_params})
+        
+        # 二次模型(抛物线)
+        quadratic_params = np.polyfit(x, scores, 2)
+        quadratic_r2 = self._r_squared(x, scores, np.poly1d(quadratic_params))
+        results.append({'type': 'quadratic', 'r2': quadratic_r2, 'params': quadratic_params})
+        
+        # 尝试拟合S曲线(Logistic)
+        logistic_r2 = self._fit_logistic_model(x, scores)
+        results.append({'type': 'logistic', 'r2': logistic_r2, 'params': None})
+        
+        return results
+    
+    def _fit_logistic_model(self, x, scores):
+        """尝试拟合逻辑斯蒂模型，返回R²值"""
+        try:
+            from scipy.optimize import curve_fit
+            
+            def logistic(x, a, b, c, d):
+                return self.safe_logistic(x, a, b, c, d)
+            
+            # 标准化x以帮助拟合
+            x_norm = (x - np.min(x)) / (np.max(x) - np.min(x)) if np.max(x) > np.min(x) else x
+            
+            # 参数估计和约束
+            p0 = [
+                np.max(scores) - np.min(scores),  # 范围
+                1.0,  # 增长率
+                0.5,  # 中点位置
+                np.min(scores)  # 最小值
+            ]
+            
+            bounds = (
+                [0, 0, 0, np.min(scores)*0.9],  # 下界
+                [np.inf, 10, 1, np.max(scores)]  # 上界
+            )
+            
+            try:
+                popt, _ = curve_fit(logistic, x_norm, scores, p0=p0, bounds=bounds, maxfev=2000)
+                logistic_r2 = self._r_squared(x_norm, scores, lambda x: logistic(x, *popt))
+            except:
+                logistic_r2 = 0
+        except:
+            logistic_r2 = 0
+            
+        return logistic_r2
+    
+    def _determine_growth_pattern(self, best_model, volatility, has_plateau, has_breakthrough, trend, quadratic_params=None):
+        """确定成长模式类型"""
+        if best_model == "线性成长":
+            if volatility < 3:
+                return f"稳定{trend}"
+            else:
+                return f"波动{trend}"
+        elif best_model == "加速/减速成长" and quadratic_params is not None:
+            if quadratic_params[0] > 0:
+                return "加速成长"
+            else:
+                return "减速成长"
+        else:  # S型成长
+            if has_plateau and has_breakthrough:
+                return "突破型成长"
+            elif has_plateau:
+                return "平台后成长"
+            else:
+                return "渐进成长"
+    
+    def _r_squared(self, x, y, model):
+        """计算R²值"""
+        y_pred = model(x)
+        ss_total = np.sum((y - np.mean(y))**2)
+        ss_residual = np.sum((y - y_pred)**2)
+        return 1 - (ss_residual / ss_total) if ss_total != 0 else 0
+        
+    def get_student_report(self, student_id):
+        """
+        生成基于非线性模型的学生报告
+        
+        Args:
+            student_id: 学生ID
+            
+        Returns:
+            dict: 包含学生详细分析的字典
+        """
+        if self.potential_scores is None:
+            self.evaluate_potential()
+            
+        if self.growth_patterns is None:
+            self.analyze_growth_patterns()
+            
+        # 获取学生数据
+        student_data = self.data[self.data['student_id'] == student_id].sort_values('exam_id')
+        potential = self.potential_scores[self.potential_scores['student_id'] == student_id]
+        growth = self.growth_patterns[self.growth_patterns['student_id'] == student_id]
+        
+        if student_data.empty:
+            return {"error": f"未找到学生 {student_id} 的数据"}
+            
+        # 生成报告
+        report = {
+            'student_id': student_id,
+            'name': student_data['student_name'].iloc[0] if 'student_name' in student_data.columns 
+                   else (student_data['name'].iloc[0] if 'name' in student_data.columns else "未知"),
+            'class': student_data['class_name'].iloc[0] if 'class_name' in student_data.columns else "未知",
+            'school': student_data['school_name'].iloc[0] if 'school_name' in student_data.columns else "未知",
+            'grade': student_data['grade'].iloc[0] if 'grade' in student_data.columns else "未知",
+            'exam_count': len(student_data),
+            'latest_score': student_data['standard_score'].iloc[-1],
+            'first_score': student_data['standard_score'].iloc[0],
+            'total_growth': student_data['standard_score'].iloc[-1] - student_data['standard_score'].iloc[0],
+            
+            # 潜力评价指标
+            'avg_growth_rate': potential['base_growth'].iloc[0] if not potential.empty else None,
+            'momentum': potential['momentum'].iloc[0] if not potential.empty else None,
+            'breakthrough_count': potential['breakthrough_count'].iloc[0] if not potential.empty else 0,
+            'resilience': potential['resilience'].iloc[0] if not potential.empty else None,
+            
+            # 非线性成长评估
+            'potential_score': potential['potential_score_norm'].iloc[0] if not potential.empty else None,
+            'potential_rating': potential['potential_rating'].iloc[0] if not potential.empty else None,
+            'best_growth_model': growth['best_model'].iloc[0] if not growth.empty else "数据不足",
+            'growth_pattern': growth['growth_pattern'].iloc[0] if not growth.empty else "数据不足",
+            'model_fit_quality': growth['r_squared'].iloc[0] if not growth.empty else None,
+            
+            # 历史数据
+            'scores_history': student_data[['exam_id', 'standard_score']].values.tolist(),
+            'velocity_history': student_data[['exam_id', 'learning_velocity']].values.tolist() if 'learning_velocity' in student_data.columns else [],
+            
+            # 学习阶段和建议
+            'learning_phase': self._identify_learning_phase(student_id),
+        }
+        
+        # 添加阶段建议
+        report['phase_recommendations'] = self._get_phase_recommendations(report['learning_phase'])
+        
+        return report
+    
+    def _identify_learning_phase(self, student_id):
+        """识别学生当前的学习阶段"""
+        student_data = self.data[self.data['student_id'] == student_id].sort_values('exam_id')
+        
+        if len(student_data) < 3:
+            return "数据不足"
+            
+        # 获取最近的学习速度和加速度
+        recent_velocity = student_data['learning_velocity'].iloc[-1]
+        recent_acceleration = student_data['learning_acceleration'].iloc[-1]
+        in_plateau = student_data['in_plateau'].iloc[-1]
+        
+        # 判断学习阶段
+        if in_plateau:
+            return "平台期"
+        elif recent_acceleration > 0 and recent_velocity > 0:
+            return "加速成长期"
+        elif recent_acceleration < 0 and recent_velocity > 0:
+            return "减速成长期"
+        elif recent_velocity < 0:
+            return "调整期"
+        else:
+            return "稳定成长期"
+    
+    def _get_phase_recommendations(self, phase):
+        """基于学习阶段生成建议"""
+        recommendations = []
+        
+        if phase == "平台期":
+            recommendations.append("当前处于学习平台期，可能遇到了知识瓶颈")
+            recommendations.append("建议尝试不同的学习方法打破思维定势")
+            recommendations.append("适当增加练习难度，挑战自我")
+        elif phase == "加速成长期":
+            recommendations.append("当前正处于快速进步阶段，学习效率高")
+            recommendations.append("建议保持当前学习状态和方法")
+            recommendations.append("可以尝试扩展学习内容的广度")
+        elif phase == "减速成长期":
+            recommendations.append("进步速度正在放缓，可能接近当前知识模块的掌握上限")
+            recommendations.append("建议深入巩固已学内容，确保知识结构完整")
+            recommendations.append("准备迎接下一阶段的学习挑战")
+        elif phase == "调整期":
+            recommendations.append("成绩出现暂时回落，属于学习过程中的正常调整")
+            recommendations.append("建议回顾基础知识，查漏补缺")
+            recommendations.append("调整学习节奏，避免焦虑情绪影响学习")
+        else:
+            recommendations.append("当前学习状态稳定，进步速度均衡")
+            recommendations.append("建议保持当前学习习惯，适当提高自我要求")
+            
+        return recommendations
+
+    @staticmethod
+    def safe_logistic(x, a, b, c, d):
+        """安全的逻辑斯蒂函数，防止溢出"""
+        # 限制指数函数的输入范围
+        exp_term = np.clip(-b * (x - c), -100, 100)  # 限制在合理范围内
+        return a / (1 + np.exp(exp_term)) + d
+
+    # 在NonlinearStudentPotentialEvaluator类中添加以下方法实现
+
+    def _validate_data(self):
+        """
+        验证数据有效性
+        
+        这是对抽象方法的实现。非线性潜力评估器有自己特定的数据验证逻辑。
+        
+        Returns:
+            bool: 数据是否有效
+        """
+        # 非线性潜力评估有自己的验证逻辑，已在prepare_data方法中处理
+        # 这里只需返回True表示验证通过
+        return True
+
+    def _calculate_value_added_impl(self):
+        """
+        计算增值分值的具体实现
+        
+        非线性潜力评估器不使用传统增值计算方法，而是使用evaluate_potential。
+        提供此方法只是为了满足抽象类的要求。
+        
+        Returns:
+            DataFrame: 空数据框
+        """
+        # 非线性潜力评估使用evaluate_potential方法，不使用此方法
+        logger.info("NonlinearStudentPotentialEvaluator使用evaluate_potential而不是_calculate_value_added_impl")
+        return pd.DataFrame()
+
+    def _predict_impl(self, new_data=None):
+        """
+        预测新数据的实现
+        
+        非线性潜力评估器有自己的预测逻辑，不使用此方法。
+        提供此方法只是为了满足抽象类的要求。
+        
+        Args:
+            new_data: 新数据
+            
+        Returns:
+            DataFrame: 空数据框
+        """
+        # 非线性潜力评估使用其他方法进行预测
+        logger.info("NonlinearStudentPotentialEvaluator使用特定的预测方法而不是_predict_impl")
+        return pd.DataFrame()
+
+    def _identify_consistent_performers(self):
+        """
+        识别长期保持学科优势的学生
+        
+        这个方法计算几个关键指标来识别始终表现优秀的学生，而不仅是那些
+        有突破性成长的学生。
+        
+        Returns:
+            DataFrame: 包含一致性表现指标的数据框
+        """
+        # 准备结果数据框
+        student_ids = self.data['student_id'].unique()
+        consistent_metrics = {
+            'student_id': [],
+            'percentile_stability': [],  # 百分位稳定性
+            'top_quartile_ratio': [],    # 位于前25%的考试比例
+            'relative_advantage': [],    # 相对优势维持度
+            'consistent_performer': []   # 综合判断结果
+        }
+        
+        # 计算每次考试的全体分数分布
+        exam_percentiles = {}
+        for exam_id in self.data['exam_id'].unique():
+            exam_scores = self.data[self.data['exam_id'] == exam_id]['standard_score']
+            exam_percentiles[exam_id] = {score: stats.percentileofscore(exam_scores, score) 
+                                        for score in exam_scores}
+        
+        # 为每个学生计算指标
+        for student_id in student_ids:
+            student_data = self.data[self.data['student_id'] == student_id].sort_values('exam_id')
+            
+            # 1. 百分位稳定性 - 学生百分位排名的稳定性
+            percentiles = [exam_percentiles[row['exam_id']][row['standard_score']] 
+                          for _, row in student_data.iterrows()]
+            percentile_stability = 100 - np.std(percentiles)  # 标准差越小越稳定
+            
+            # 2. 前25%比例 - 学生成绩位于前25%的考试比例
+            top_quartile_count = sum(1 for p in percentiles if p >= 75)
+            top_quartile_ratio = top_quartile_count / len(percentiles) * 100
+            
+            # 3. 相对优势 - 学生与平均分差距的变化趋势
+            advantages = []
+            for _, row in student_data.iterrows():
+                exam_mean = self.data[self.data['exam_id'] == row['exam_id']]['standard_score'].mean()
+                advantage = row['standard_score'] - exam_mean
+                advantages.append(advantage)
+            
+            # 计算相对优势的趋势（正值表示优势在扩大）
+            if len(advantages) >= 2:
+                advantage_trend = np.polyfit(range(len(advantages)), advantages, 1)[0]
+            else:
+                advantage_trend = 0
+                
+            relative_advantage = np.mean(advantages) + advantage_trend * 10  # 均值+趋势加权
+            
+            # 添加到结果中
+            consistent_metrics['student_id'].append(student_id)
+            consistent_metrics['percentile_stability'].append(percentile_stability)
+            consistent_metrics['top_quartile_ratio'].append(top_quartile_ratio)
+            consistent_metrics['relative_advantage'].append(relative_advantage)
+            
+            # 综合判断 - 稳定在前25%且百分位稳定
+            is_consistent = (top_quartile_ratio >= 75 and percentile_stability > 80)
+            consistent_metrics['consistent_performer'].append(is_consistent)
+        
+        # 创建DataFrame并与潜力评估结果合并
+        consistent_df = pd.DataFrame(consistent_metrics)
+        
+        # 记录日志
+        consistent_count = consistent_df['consistent_performer'].sum()
+        logger.info(f"识别出{consistent_count}名长期保持学科优势的学生")
+        
+        return consistent_df
+
+    def _calculate_student_potential(self, student_id):
+        """
+        计算单个学生的非线性潜力指标
+        
+        Args:
+            student_id: 要计算潜力的学生ID
+            
+        Returns:
+            dict: 包含学生潜力评估结果的字典
+        """
+        # 获取该学生的数据并按考试顺序排序
+        student_data = self.data[self.data['student_id'] == student_id].sort_values('exam_id')
+        
+        if len(student_data) < 3:
+            # 考试记录太少，无法可靠计算潜力
+            return {
+                'student_id': student_id,
+                'potential_score': 0,
+                'base_growth': 0,
+                'momentum': 0,
+                'breakthrough_count': 0,
+                'resilience': 0,
+                'potential_score_norm': 0,
+                'potential_rating': 'E'
+            }
+        
+        # 1. 基础成长率 - 使用平均学习速度
+        base_growth = student_data['learning_velocity'].mean()
+        
+        # 2. 近期势头 - 最近几次考试的学习速度加权平均
+        # 如果记录足够多，取最近3次；否则取所有记录
+        recent_count = min(3, len(student_data))
+        recent_data = student_data.iloc[-recent_count:]
+        momentum = recent_data['learning_velocity'].mean()
+        
+        # 3. 突破能力 - 统计突破次数
+        breakthrough_count = student_data['breakthrough'].sum()
+        
+        # 4. 韧性指数 - 平台期后的恢复能力
+        resilience = 0
+        if len(student_data) >= 3:
+            post_plateau_growth = []
+            for i in range(len(student_data) - 1):
+                if student_data.iloc[i]['in_plateau'] and i < len(student_data) - 1:
+                    post_plateau_growth.append(student_data.iloc[i+1]['learning_velocity'])
+        
+            resilience = np.mean(post_plateau_growth) if post_plateau_growth else 0
+        
+        # 5. 综合潜力分数计算
+        # 应用非线性加权
+        potential_score = (
+            base_growth * 0.3 + 
+            momentum * 0.3 +
+            np.log1p(float(breakthrough_count)) * 10 * 0.2 +
+            resilience * 0.2
+        )
+        
+        # 转换为0-100的标准分数（在完成所有计算后规范化）
+        # 这里只返回原始分数，规范化在收集所有学生后进行
+        
+        return {
+            'student_id': student_id,
+            'potential_score': potential_score,
+            'base_growth': base_growth,
+            'momentum': momentum,
+            'breakthrough_count': breakthrough_count,
+            'resilience': resilience
+        }
+
