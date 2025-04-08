@@ -42,17 +42,11 @@ import statsmodels.formula.api as smf
 from statsmodels.regression.mixed_linear_model import MixedLM
 from statsmodels.regression.linear_model import OLS
 from statsmodels.tsa.statespace.kalman_filter import KalmanFilter
+from core.management.commands.education_data_provider import EducationDataProvider  # 数据提供器
 
 # 配置日志
 logger = logging.getLogger(__name__)
 
-# 导入后立即配置matplotlib
-import matplotlib as mpl
-# 抑制不必要的matplotlib调试输出
-mpl.set_loglevel('WARNING')  # 仅显示警告及以上级别的日志
-
-# 导入后配置matplotlib日志级别
-import logging
 # 将matplotlib相关日志级别设置为WARNING
 logging.getLogger('matplotlib').setLevel(logging.WARNING)
 
@@ -103,59 +97,99 @@ class ValueAddedDataProcessor:
         self.baseline_exam = kwargs.pop('baseline_exam', None)
         
         # 创建数据提供者
-        from core.management.commands.education_data_provider import EducationDataProvider
+
         self.provider = EducationDataProvider(**kwargs)
         
         # 加载数据
         self.data = self.provider.get_data()
         
         logger.info(f"加载了{len(self.data)}条数据")
+        logger.info(f"DataProvider提供的数据字段: {self.data.columns.tolist()}")
         return self.data
     
     def _process_pre_post_tests(self, data, baseline_exam=None):
         """
-        处理前测和后测数据
+        处理前测后测数据
+        
+        为增值模型创建前测和后测成绩字段
         
         Args:
-            data: 输入数据
-            baseline_exam: 指定的基准考试ID（可选）
+            data: 数据框
+            baseline_exam: 基准考试ID（可选）
             
         Returns:
-            DataFrame: 添加了前测信息的数据
+            DataFrame: 处理后的数据框
         """
-        # 确保数据包含必要字段
-        required_fields = ['student_id', 'standard_score', 'exam_id']
-        missing_fields = [f for f in required_fields if f not in data.columns]
-        if missing_fields:
-            raise ValueError(f"数据缺少必要字段: {missing_fields}")
+        # 检查考试ID列是否存在
+        if 'exam_id' not in data.columns:
+            logger.error("数据中缺少exam_id列")
+            raise ValueError("数据格式错误：缺少exam_id列")
         
-        # 按学生ID和考试ID排序
-        prep_data = data.sort_values(['student_id', 'exam_id'])
+        # 获取所有不同的考试ID
+        all_exams = data['exam_id'].unique().tolist()
         
-        # 如果指定了基准考试，则使用它
-        if baseline_exam:
-            # 使用指定的基准考试
-            prior_scores = prep_data[prep_data['exam_id'] == baseline_exam].copy()
-            if prior_scores.empty:
-                raise ValueError(f"指定的基准考试 {baseline_exam} 在数据中不存在")
-            logger.info(f"使用指定考试作为基准(前测): {baseline_exam}")
+        # 检查基准考试是否存在
+        if baseline_exam is not None and baseline_exam not in all_exams:
+            logger.warning(f"指定的基准考试 {baseline_exam} 不在数据集中")
+            logger.info(f"可用的考试ID: {', '.join(all_exams)}")
+            logger.info("将使用默认的第一次考试作为基准")
+            baseline_exam = None
+        
+        # 如果未指定基准考试，使用第一个考试ID
+        if baseline_exam is None:
+            # 根据考试时间排序（如果有）或使用第一个考试
+            if 'exam_date' in data.columns:
+                sorted_exams = data.sort_values('exam_date')['exam_id'].unique()
+                baseline_exam = sorted_exams[0]
+            else:
+                baseline_exam = all_exams[0]
+            logger.info(f"使用 {baseline_exam} 作为基准考试")
+        
+        # 复制数据以避免修改原始数据
+        result_data = data.copy()
+        
+        # 创建前测和后测标记
+        result_data['is_baseline'] = result_data['exam_id'] == baseline_exam
+        
+        # 提取基准考试数据
+        baseline_data = result_data[result_data['is_baseline']].copy()
+        
+        # 如果数据中有学生ID列
+        if 'student_id' in data.columns:
+            # 创建学生ID到基准分数的映射
+            prior_scores = dict(zip(baseline_data['student_id'], baseline_data['standard_score']))
+            
+            # 创建前测分数列
+            result_data['prior_score'] = result_data['student_id'].map(prior_scores)
+            
+            # 检查是否所有学生都有前测分数
+            missing_prior = result_data['prior_score'].isna().sum()
+            if missing_prior > 0:
+                logger.warning(f"{missing_prior}名学生缺少基准考试分数，将使用平均分填充")
+                # 使用平均分填充缺失值
+                mean_prior = baseline_data['standard_score'].mean()
+                result_data['prior_score'].fillna(mean_prior, inplace=True)
+        
+        # 如果使用数值索引代替ID
+        elif 'student_idx' in data.columns:
+            # 创建学生索引到基准分数的映射
+            prior_scores = dict(zip(baseline_data['student_idx'], baseline_data['standard_score']))
+            
+            # 创建前测分数列
+            result_data['prior_score'] = result_data['student_idx'].map(prior_scores)
+            
+            # 检查是否所有学生都有前测分数
+            missing_prior = result_data['prior_score'].isna().sum()
+            if missing_prior > 0:
+                logger.warning(f"{missing_prior}名学生缺少基准考试分数，将使用平均分填充")
+                # 使用平均分填充缺失值
+                mean_prior = baseline_data['standard_score'].mean()
+                result_data['prior_score'].fillna(mean_prior, inplace=True)
         else:
-            # 否则为每个学生使用第一次考试
-            prep_data['time_point'] = prep_data.groupby('student_id')['exam_id'].rank(method='dense')
-            prior_scores = prep_data[prep_data['time_point'] == 1].copy()
-            baseline_exams = prior_scores['exam_id'].unique()
-            self.baseline_exams = baseline_exams
-            logger.info(f"使用以下考试作为基准(前测): {', '.join(baseline_exams)}")
-            if len(baseline_exams) > 1:
-                logger.warning(f"检测到多个基准考试，这可能导致结果混乱。请考虑使用--baseline参数指定单一基准考试。")
+            raise ValueError("数据中缺少student_id或student_idx字段")
         
-        prior_scores = prior_scores[['student_id', 'standard_score']]
-        prior_scores.rename(columns={'standard_score': 'prior_score'}, inplace=True)
-        
-        # 合并前测成绩到所有记录
-        prep_data = pd.merge(prep_data, prior_scores, on='student_id', how='left')
-        
-        return prep_data
+        # 返回处理后的数据
+        return result_data
     
     def _filter_pretest_data(self, data, baseline_exam=None):
         """
@@ -450,6 +484,7 @@ class ValueAddedDataProcessor:
             DataFrame: 添加了班级ID相关列的数据框
         """
         if 'class_id' not in model_data.columns:
+            logger.warning("数据中缺少class_id字段，无法处理班级ID")
             return model_data
             
         # 从exam_id判断学段
@@ -716,6 +751,22 @@ class ValueAddedDataProcessor:
         
         return df
 
+    def _clean_data(self, data, **kwargs):
+        """减少过滤条件，保留更多学生数据"""
+        cleaned_data = data.copy()
+        
+        # 减小最小班级人数要求
+        min_class_size = kwargs.get('min_class_size', 5)  # 原为10
+        
+        # 按班级统计学生数
+        class_sizes = cleaned_data.groupby('class_id')['student_id'].nunique()
+        valid_classes = class_sizes[class_sizes >= min_class_size].index
+        
+        # 保留有效班级的数据
+        cleaned_data = cleaned_data[cleaned_data['class_id'].isin(valid_classes)]
+        
+        return cleaned_data
+
 #############################################
 # 第二部分: 模型基类
 #############################################
@@ -737,64 +788,45 @@ class BaseValueAddedModel(ABC):
         """
         self.raw_data = data
         self.data = None  # 处理后的建模数据
-        self.data_processor = data_processor or ValueAddedDataProcessor()
+        self.data_processor = data_processor
         self.model = None
         self.metrics = {}
         self.result = None
     
-    def prepare_data(self, data=None):
-        """
-        准备模型所需数据
-        
-        子类应该重写此方法以实现特定的数据处理逻辑
-        
-        Args:
-            data: 输入数据，如果为None则使用初始化时的数据
-            
-        Returns:
-            DataFrame: 准备好的建模数据
-        """
-        if data is not None:
-            self.raw_data = data
-            
-        if self.raw_data is None:
-            raise ValueError("请提供数据")
-            
-        # 获取数据处理工具
+
+    
+    # 辅助方法 - 供子类调用的数据处理工具函数
+    def _process_pre_post_tests(self, data, baseline_exam=None):
+        """处理前测后测数据"""
         processors = self.data_processor.get_data_processors()
-        
-        # 基本数据处理流程 - 子类可重写此方法
-        baseline_exam = getattr(self.data_processor, 'baseline_exam', None)
-        
-        # 前测后测处理
-        model_data = processors['process_pre_post_tests'](self.raw_data, baseline_exam)
-        
-        # 过滤前测数据
-        model_data = processors['filter_pretest_data'](model_data, baseline_exam)
-        
-        # 创建数值索引
-        model_data = processors['create_numeric_indices'](model_data)
-        
-        # 确保学生和学校名称
-        model_data = processors['ensure_school_names'](model_data)
-        model_data = processors['ensure_student_names'](model_data)
-        
-        # 处理班级ID
-        model_data = processors['process_class_ids'](model_data)
-        
-        # 生成友好ID
-        model_data = processors['generate_display_ids'](model_data)
-        
-        # 保存处理后的数据
-        self.data = model_data
-        return model_data
-        
-    def fit(self, data=None):
+        return processors['process_pre_post_tests'](data, baseline_exam)
+    
+    def _filter_pretest_data(self, data, baseline_exam=None):
+        """过滤前测数据"""
+        processors = self.data_processor.get_data_processors()
+        return processors['filter_pretest_data'](data, baseline_exam)
+    
+    def _create_numeric_indices(self, data):
+        """创建数值索引"""
+        processors = self.data_processor.get_data_processors()
+        return processors['create_numeric_indices'](data)
+    
+    def _ensure_names_and_ids(self, data):
+        """确保学生、学校、班级名称和ID字段"""
+        processors = self.data_processor.get_data_processors()
+        data = processors['ensure_school_names'](data)
+        data = processors['ensure_student_names'](data)
+        data = processors['process_class_ids'](data)
+        data = processors['generate_display_ids'](data)
+        return data
+    
+    def fit(self, data=None, skip_data_prep=False):  # 添加参数
         """
         拟合模型
         
         Args:
             data: 原始数据，如果为None则使用初始化时的数据
+            skip_data_prep: 是否跳过数据准备（如果已在外部处理）
             
         Returns:
             self: 支持链式调用
@@ -802,8 +834,8 @@ class BaseValueAddedModel(ABC):
         if data is not None:
             self.raw_data = data
         
-        # 准备数据
-        if self.data is None:
+        # 准备数据，如果未跳过
+        if self.data is None and not skip_data_prep:
             self.prepare_data()
         
         self._validate_data()
@@ -852,7 +884,14 @@ class BaseValueAddedModel(ABC):
             dict: 评估指标
         """
         return self.metrics
-    
+    def get_export_field_mapping(self):
+        """
+        获取字段映射关系，用于Excel导出
+        
+        Returns:
+            dict: 包含字段映射的字典，格式为 {level: {原字段: 目标字段}}
+        """
+        return {}  # 默认为空，由子类实现    
     @abstractmethod
     def _validate_data(self):
         """验证模型所需数据"""
@@ -877,7 +916,19 @@ class BaseValueAddedModel(ABC):
     def _calculate_value_added_impl(self):
         """增值效应计算的具体实现"""
         pass
-    
+
+    @abstractmethod
+    def prepare_data(self, data=None):
+        """
+        准备模型所需数据 - 抽象方法，子类必须实现
+        
+        Args:
+            data: 输入数据，如果为None则使用初始化时的数据
+            
+        Returns:
+            DataFrame: 准备好的建模数据
+        """
+        pass
     def save_results(self, output_dir):
         """
         保存模型结果
@@ -977,13 +1028,36 @@ class ValueAddedVisualizer:
     
     def _plot_value_added_distribution(self, df, title, output_path):
         """绘制增值效应分布图"""
+        if df.empty:
+            logger.warning(f"没有增值效应数据，跳过绘图")
+            return
+        
         plt.figure(figsize=(10, 6))
-        plt.hist(df['mean' if 'mean' in df.columns else 'value_added'], bins=20, alpha=0.7)
-        plt.axvline(0, color='red', linestyle='--')
+        
+        # 查找效应列名 - 适应不同版本的输出格式
+        effect_col = None
+        for possible_col in ['effect', 'mean', 'value_added']:
+            if possible_col in df.columns:
+                effect_col = possible_col
+                break
+        
+        if effect_col is None:
+            logger.error(f"无法找到效应列，可用列：{df.columns.tolist()}")
+            return
+        
+        # 使用找到的列名绘图
+        plt.hist(df[effect_col], bins=20, alpha=0.7)
         plt.title(title)
-        plt.xlabel('Value-Added Score')
-        plt.ylabel('Frequency')
+        plt.xlabel('增值效应值')
+        plt.ylabel('频率')
         plt.grid(True, linestyle='--', alpha=0.7)
+        
+        # 添加垂直线表示均值
+        mean_effect = df[effect_col].mean()
+        plt.axvline(mean_effect, color='r', linestyle='--', 
+                    label=f'均值: {mean_effect:.4f}')
+        
+        plt.legend()
         plt.tight_layout()
         plt.savefig(output_path, dpi=300)
         plt.close()
@@ -1075,33 +1149,28 @@ class ValueAddedVisualizer:
                     params_df = pd.DataFrame({'参数': params.index, '数值': params.values})
                     params_df.to_excel(writer, sheet_name="模型参数", index=False)
                 
-                # 写入各层级增值效应（包括学校和班级名称）
-                for level in ['schools', 'classes']:
+                # 从模型对象获取字段映射（如果有）
+                field_mapping = {}
+                if model_object and hasattr(model_object, 'get_export_field_mapping'):
+                    field_mapping = model_object.get_export_field_mapping()
+                
+                # 写入各层级增值效应
+                for level in ['schools', 'classes', 'students']:
                     if level in self.result and not self.result[level].empty:
                         df = self.result[level].copy()
                         
-                        # 添加学校/班级名称列（如果有映射数据）
-                        try:
-                            # 尝试从模型对象获取mappings
-                            if hasattr(model_object, 'mappings') and model_object.mappings:
-                                entity_map = model_object.mappings.get(level, {})
-                                if entity_map:
-                                    df['名称'] = df['entity_id'].map(
-                                        lambda x: entity_map.get(str(x), str(x))
-                                    )
-                        except Exception as e:
-                            logger.warning(f"无法添加实体名称: {str(e)}")
+                        # 使用模型提供的映射（优先）
+                        level_mapping = field_mapping.get(level, {})
+                        common_mapping = field_mapping.get('common', {})
                         
-                        # 设置友好的列名
-                        column_rename = {
-                            'entity_id': '实体ID',
-                            'mean': '增值效应',
-                            'std_err': '标准误',
-                            'ci_lower': '置信区间下限',
-                            'ci_upper': '置信区间上限'
-                        }
+                        # 合并通用映射和层级特定映射
+                        column_rename = {**common_mapping, **level_mapping}
                         
-                        # 只重命名存在的列
+                        # 回退到内置映射（如果模型没有提供）
+                        if not column_rename:
+                            column_rename = self._get_default_field_mapping(level)
+                        
+                        # 应用字段映射
                         for old_name, new_name in column_rename.items():
                             if old_name in df.columns:
                                 df.rename(columns={old_name: new_name}, inplace=True)
@@ -1109,7 +1178,7 @@ class ValueAddedVisualizer:
                         # 如果没有名称列，尝试从实体ID创建
                         if '名称' not in df.columns:
                             entity_type = '学校' if level == 'schools' else '班级'
-                            df['名称'] = df['实体ID'].apply(lambda x: f"{entity_type}{x}")
+                            df['名称'] = df['entity_id'].apply(lambda x: f"{entity_type}{x}")
                         
                         # 调整列顺序，将ID和名称放在前面
                         cols = df.columns.tolist()
@@ -1675,147 +1744,335 @@ class FrequentistValueAddedModel(BaseValueAddedModel):
 
 class BayesianValueAddedModel(BaseValueAddedModel):
     """
-    贝叶斯多层次增值模型实现
+    贝叶斯多层次增值模型
     
-    使用PyMC进行全贝叶斯推断，通过MCMC采样获得参数和效应的后验分布。
-    模型捕获了学生、班级、学校各个层级的随机效应，并提供了不确定性估计。
-    
-    Args:
-        data: 建模数据
-        mcmc_samples: MCMC采样次数
-        tune: MCMC调整步数
-        random_seed: 随机种子
+    使用完全贝叶斯推断方法估计各层级效应
     """
     
-    def __init__(self, data=None, mcmc_samples=1000, tune=500, random_seed=42):
+    def __init__(self, data=None, data_processor=None, baseline_exam=None, mcmc_samples=1000, tune=500, random_seed=42):
         """
         初始化贝叶斯多层次模型
         
         Args:
             data: 建模数据
+            data_processor: 数据处理器
+            baseline_exam: 基准考试ID（可选）
             mcmc_samples: MCMC采样次数
             tune: MCMC调整步数
-            random_seed: 随机种子
+            random_seed: 随机数种子
         """
-        super().__init__(data)
+        # 调用父类的初始化方法（不传递baseline_exam）
+        super().__init__(data, data_processor)
+        
+        # 存储基准考试ID
+        self.baseline_exam = baseline_exam
+        
+        # 贝叶斯特有参数
         self.mcmc_samples = mcmc_samples
         self.tune = tune
         self.random_seed = random_seed
         self.trace = None
         self.pymc_model = None
     
-    def _validate_data(self):
+    def prepare_data(self, data=None):
         """
-        验证贝叶斯模型所需数据
+        准备贝叶斯增值模型的数据
         
-        确保数据符合由ValueAddedDataProcessor预处理后的标准格式
+        重要设计说明:
+        1. 将基准考试(前测)成绩提取为prior_score
+        2. 从建模数据中移除基准考试记录
+        3. 只使用后测记录进行实际建模
         
-        Raises:
-            ValueError: 如果缺少必要字段
+        这是增值模型的标准设计 - 我们感兴趣的是学生在基准考试后的进步
         """
-        # 所有模型共同需要的基础字段
-        required_fields = ['prior_score', 'standard_score', 'student_idx']
+        # 首先调用基类的prepare_data获取基础处理后的数据
+        model_data = super().prepare_data(data)
         
-        # 模型特定需要的额外字段
-        model_specific_fields = []
+        # 获取数据处理工具
+        processors = self.data_processor.get_data_processors()
         
-        # 例如，贝叶斯模型可能还需要
-        if isinstance(self, BayesianValueAddedModel):
-            model_specific_fields.extend(['class_idx', 'school_idx'])
+        # 显示处理前的数据信息
+        logger.info(f"贝叶斯模型准备数据，接收的数据字段: {sorted(model_data.columns.tolist())}")
+        logger.info(f"数据样本量: {len(model_data)}行")
+
+        # 创建数值索引
+        self.data_processor._create_numeric_indices(model_data)
+
+        # 处理前测后测成绩 - 增加错误处理
+        try:
+            # 检查指定的基准考试是否存在
+            if self.baseline_exam is None:
+                logger.warning(f"指定的基准考试 {self.baseline_exam} 不存在，将使用默认的第一次考试作为基准")
+                self.baseline_exam = None  # 置为None以使用默认逻辑
+                
+            # 调用处理方法
+            model_data = self.data_processor._process_pre_post_tests(model_data, self.baseline_exam)
+        except Exception as e:
+            logger.error(f"处理前测后测数据时出错: {str(e)}")
+            raise ValueError(f"处理前测后测数据失败: {str(e)}")
         
-        # TVAM模型需要实体字段
-        if isinstance(self, TVAMValueAddedModel):
-            model_specific_fields.append(f"{self.entity_type}_idx")
-        
-        # 合并所有必要字段
-        all_required_fields = required_fields + model_specific_fields
-        
-        # 检查缺失字段
-        missing_fields = [f for f in all_required_fields if f not in self.data.columns]
+        # 贝叶斯模型特定处理
+        # 1. 确保所有必需字段存在
+        required_fields = ['student_idx', 'class_idx', 'prior_score', 'standard_score','school_idx']
+        missing_fields = [f for f in required_fields if f not in model_data.columns]
         if missing_fields:
-            raise ValueError(f"数据缺少{self.__class__.__name__}所需字段: {missing_fields}")
-    
+            raise ValueError(f"贝叶斯模型缺少必要字段: {missing_fields}")
+            
+        # 2. 处理异常值和缺失值
+        model_data = self._handle_outliers_and_missing(model_data)
+        
+        # 3. 添加学校层级平均分（如果有学校信息）
+        
+        school_means = model_data.groupby('school_idx')['prior_score'].mean().reset_index()
+        school_means.columns = ['school_idx', 'school_mean_prior']
+        model_data = pd.merge(model_data, school_means, on='school_idx', how='left')
+        logger.info("已添加学校平均前测成绩作为协变量")
+
+
+        # 4. 添加班级平均分
+        class_means = model_data.groupby('class_idx')['prior_score'].mean().reset_index()
+        class_means.columns = ['class_idx', 'class_mean_prior']
+        model_data = pd.merge(model_data, class_means, on='class_idx', how='left')
+        logger.info("已添加班级平均前测成绩作为协变量")
+
+
+        # 5. 创建中心化变量（对贝叶斯模型采样很有用）
+        model_data['prior_score_centered'] = model_data['prior_score'] - model_data['prior_score'].mean()
+        logger.info("已创建中心化前测分数变量")
+        
+        # 记录数据处理后的统计信息
+        logger.info(f"贝叶斯模型数据准备完成，包含{model_data['student_idx'].nunique()}名学生，" + 
+                   f"{model_data['class_idx'].nunique()}个班级")
+        if 'school_idx' in model_data.columns:
+            logger.info(f"包含{model_data['school_idx'].nunique()}所学校")
+                # 6. 确保必要的名称字段（使用处理器功能）
+        self.data = processors['ensure_student_names'](self.data)
+        self.data = processors['ensure_school_names'](self.data)
+        self.data = processors['ensure_class_names'](self.data)
+        self.data = processors['ensure_grade_field'](self.data)
+        # 保存处理后的数据
+        self.data = model_data
+        
+        # 添加调试日志
+        logger.info(f"数据列: {self.data.columns.tolist()}")
+        
+
+        
+        # 创建详细的班级和学校映射表
+        self.class_mapping = (
+            self.data[['class_idx', 'class_id', 'class_name', 'school_id', 'school_name', 'display_id']]
+            .drop_duplicates()
+            .set_index('class_idx')
+        )
+        
+        self.school_mapping = (
+            self.data[['school_idx', 'school_id', 'school_name']]
+            .drop_duplicates()
+            .set_index('school_idx')
+        )
+        
+        logger.info(f"创建了{len(self.class_mapping)}个班级的映射信息")
+        logger.info(f"创建了{len(self.school_mapping)}个学校的映射信息")
+        
+        # 在prepare_data末尾
+        logger.info(f"数据准备后的字段: {list(self.data.columns)}")
+        logger.info(f"样本班级名称: {self.data['class_name'].unique()[:5]}")
+        logger.info(f"样本学校名称: {self.data['school_name'].unique()[:5]}")
+        
+        return self.data
+        
+    def _handle_outliers_and_missing(self, data):
+        """
+        处理异常值和缺失值
+        
+        Args:
+            data: 输入数据框
+            
+        Returns:
+            DataFrame: 处理后的数据框
+        """
+        # 复制数据避免修改原始数据
+        df = data.copy()
+        
+        # 处理缺失值
+        for field in ['prior_score', 'standard_score']:
+            if df[field].isna().any():
+                logger.warning(f"检测到{field}存在缺失值，将使用均值填充")
+                df[field].fillna(df[field].mean(), inplace=True)
+        
+        # 处理异常值（使用3倍标准差法）
+        for field in ['prior_score', 'standard_score']:
+            mean, std = df[field].mean(), df[field].std()
+            lower_bound, upper_bound = mean - 3*std, mean + 3*std
+            outliers = df[(df[field] < lower_bound) | (df[field] > upper_bound)]
+            
+            if not outliers.empty:
+                logger.warning(f"检测到{len(outliers)}个{field}异常值，将进行处理")
+                # 将异常值设为边界值
+                df.loc[df[field] < lower_bound, field] = lower_bound
+                df.loc[df[field] > upper_bound, field] = upper_bound
+        
+        return df
+        
     def _build_model(self):
-        """
-        构建贝叶斯多层次模型
+        """构建贝叶斯多层次模型（优化版）"""
+        import pymc as pm
+        import numpy as np
         
-        使用PyMC创建分层贝叶斯模型，包括固定效应和随机效应
-        """
-        # 准备数据
-        model_data = self.data.copy()
-        prior_score = model_data['prior_score'].values
-        standard_score = model_data['standard_score'].values
-        student_idx = model_data['student_idx'].values
-        class_idx = model_data['class_idx'].values
+        # 数据提取保持不变
+        prior_score = self.data['prior_score'].values
+        standard_score = self.data['standard_score'].values
+        student_idx = self.data['student_idx'].values
+        class_idx = self.data['class_idx'].values
+        school_idx = self.data['school_idx'].values
         
-        # 检查是否有学校层级
-        has_school = 'school_idx' in model_data.columns
-        if has_school:
-            school_idx = model_data['school_idx'].values
+        # 计算唯一实体数量
+        n_students = len(np.unique(student_idx))
+        n_classes = len(np.unique(class_idx))
+        n_schools = len(np.unique(school_idx))
+        
+        # 标准化输入数据以提高数值稳定性
+        prior_score_std = (prior_score - np.mean(prior_score)) / np.std(prior_score)
+        standard_score_std = (standard_score - np.mean(standard_score)) / np.std(standard_score)
+        
+        logger.info(f"构建贝叶斯模型: {n_students}名学生, {n_classes}个班级, {n_schools}所学校")
         
         # 创建PyMC模型
-        with pm.Model() as self.pymc_model:
-            # 先验分布
-            intercept = pm.Normal('intercept', mu=0, sigma=10)
-            beta_prior = pm.Normal('beta_prior', mu=1, sigma=1)
+        with pm.Model() as model:
+            # 更合适的先验分布
+            intercept = pm.Normal('intercept', mu=0, sigma=10)  # 减小方差
+            beta_prior = pm.Normal('beta_prior', mu=0.8, sigma=0.5)  # 更合理的预期和范围
             
-            # 随机效应标准差
-            sigma_student = pm.HalfCauchy('sigma_student', beta=5)
-            sigma_class = pm.HalfCauchy('sigma_class', beta=5)
+            # 使用更稳定的先验
+            sigma_student = pm.HalfNormal('sigma_student', sigma=2)  # 替换HalfCauchy
+            sigma_class = pm.HalfNormal('sigma_class', sigma=2)     # 替换HalfCauchy
+            sigma_school = pm.HalfNormal('sigma_school', sigma=2)   # 替换HalfCauchy
             
-            if has_school:
-                sigma_school = pm.HalfCauchy('sigma_school', beta=5)
-                # 学校随机效应
-                school_effects = pm.Normal('school_effects', mu=0, sigma=sigma_school, shape=len(np.unique(school_idx)))
+            # 使用非中心参数化减少相关性
+            student_raw = pm.Normal('student_raw', mu=0, sigma=1, shape=n_students)
+            class_raw = pm.Normal('class_raw', mu=0, sigma=1, shape=n_classes)  
+            school_raw = pm.Normal('school_raw', mu=0, sigma=1, shape=n_schools)
             
-            # 班级随机效应
-            class_effects = pm.Normal('class_effects', mu=0, sigma=sigma_class, shape=len(np.unique(class_idx)))
-            
-            # 学生随机效应
-            student_effects = pm.Normal('student_effects', mu=0, sigma=sigma_student, shape=len(np.unique(student_idx)))
+            # 将原始变量转换为实际效应
+            student_effects = pm.Deterministic('student_effects', student_raw * sigma_student)
+            class_effects = pm.Deterministic('class_effects', class_raw * sigma_class)
+            school_effects = pm.Deterministic('school_effects', school_raw * sigma_school)
             
             # 残差标准差
-            sigma_e = pm.HalfCauchy('sigma_e', beta=5)
+            sigma_e = pm.HalfNormal('sigma_e', sigma=2)  # 替换HalfCauchy
             
-            # 构建线性预测
-            mu = intercept + beta_prior * prior_score
-            mu = mu + student_effects[student_idx]
-            mu = mu + class_effects[class_idx]
-            
-            if has_school:
-                mu = mu + school_effects[school_idx]
+            # 线性预测
+            mu = (intercept + 
+                beta_prior * prior_score_std + 
+                school_effects[school_idx] + 
+                class_effects[class_idx] + 
+                student_effects[student_idx])
             
             # 似然函数
-            y = pm.Normal('y', mu=mu, sigma=sigma_e, observed=standard_score)
+            Y = pm.Normal('Y', mu=mu, sigma=sigma_e, observed=standard_score_std)
+        
+        return model
     
     def _fit_model(self):
         """
-        拟合贝叶斯模型
+        拟合贝叶斯多层次模型
         
-        使用MCMC方法进行后验采样
+        使用PyMC执行MCMC采样
         """
-        with self.pymc_model:
-            # 使用NUTS采样器
-            self.trace = pm.sample(
-                draws=self.mcmc_samples, 
-                tune=self.tune,
-                random_seed=self.random_seed,
-                return_inferencedata=True
-            )
+        import pymc as pm
+        import arviz as az
         
-        # 计算模型评估指标
-        self.metrics = {
-            'loo': float(az.loo(self.trace, scale="deviance").loo),
-            'waic': float(az.waic(self.trace, scale="deviance").waic),
-            'r_squared': float(self._calculate_r_squared()),
-            'student_effects_std': float(np.std(self.trace.posterior.student_effects.mean(dim=("chain", "draw")).values)),
-            'class_effects_std': float(np.std(self.trace.posterior.class_effects.mean(dim=("chain", "draw")).values))
-        }
+        if self.data is None:
+            raise ValueError("请先调用prepare_data准备数据")
         
-        if 'school_idx' in self.data.columns:
-            self.metrics['school_effects_std'] = float(np.std(self.trace.posterior.school_effects.mean(dim=("chain", "draw")).values))
+        # 创建模型
+        self.pymc_model = self._build_model()
         
-        logger.info(f"贝叶斯模型拟合完成: R²={self.metrics['r_squared']:.4f}, WAIC={self.metrics['waic']:.2f}")
+        # 执行MCMC采样
+        try:
+            # 先尝试找到最大后验估计作为起点
+            with self.pymc_model:
+                try:
+                    # 寻找MAP估计作为初始值
+                    logger.info("寻找MAP估计以优化初始值...")
+                    self.map_estimate = pm.find_MAP()
+                except Exception as e:
+                    logger.warning(f"寻找MAP估计失败: {str(e)}，将使用默认初始值")
+                    start = None
+            
+            # MCMC采样参数优化
+            with self.pymc_model:
+                self.trace = pm.sample(
+                    draws=self.mcmc_samples,
+                    tune=self.tune,  # 增加调优步数
+                    chains=2,
+                    cores=4,
+                    random_seed=self.random_seed,
+                    step=pm.NUTS(target_accept=0.9),
+                    compute_convergence_checks=True,  # 恢复收敛检查
+                    progressbar=True,
+                    return_inferencedata=True
+                )
+            
+            # 计算基础评估指标
+            with self.pymc_model:
+                # 计算指标时捕获异常，避免因一个指标失败而终止整个过程
+                try:
+                    # 计算基本统计量
+                    summary = az.summary(self.trace)
+                    self.metrics['r_hat_max'] = float(summary['r_hat'].max())
+                    self.metrics['r_hat_min'] = float(summary['r_hat'].min())
+                    self.metrics['ess_min'] = float(summary['ess_bulk'].min())
+                    self.metrics['divergences'] = int(np.sum(self.trace.sample_stats.diverging.values))
+                except Exception as e:
+                    logger.warning(f"计算基本统计量时出错: {str(e)}")
+                    
+                # 尝试计算LOO指标，使用新版API处理log_likelihood
+                try:
+                    # 先检查log_likelihood是否存在
+                    if hasattr(self.trace, 'log_likelihood') or (
+                        hasattr(self.trace, 'sample_stats') and 
+                        hasattr(self.trace.sample_stats, 'log_likelihood')):
+                        
+                        # 使用新版ArviZ API：ELPDData对象
+                        loo_data = az.loo(self.trace, scale="deviance")
+                        # 直接访问elpd_loo属性而不是.loo
+                        self.metrics['loo'] = float(loo_data.elpd_loo)
+                        # 访问se属性
+                        self.metrics['loo_se'] = float(loo_data.se)
+                        # 保存更多LOO相关统计量
+                        if hasattr(loo_data, 'p_loo'):
+                            self.metrics['p_loo'] = float(loo_data.p_loo)
+                    else:
+                        # 如果没有log_likelihood，计算后验预测样本
+                        posterior_pred = pm.sample_posterior_predictive(self.trace, 
+                                                                  model=self.pymc_model)
+                        self.metrics['loo'] = None  # 无法计算LOO
+                        self.metrics['mse'] = float(((posterior_pred.posterior_predictive['Y'].mean(dim=('chain', 'draw')).values - 
+                                           self.data['standard_score'].values) ** 2).mean())
+                except Exception as e:
+                    logger.warning(f"计算评估指标时出错: {str(e)}")
+                    self.metrics['loo'] = None
+                    self.metrics['loo_se'] = None
+                    
+                # 计算或估计其他基本指标
+                try:
+                    # R^2计算
+                    self.metrics['r_squared'] = self._calculate_r_squared()
+                except Exception as e:
+                    logger.warning(f"计算R²时出错: {str(e)}")
+            
+            # 标记模型已拟合
+            self.is_fitted = True
+            # 移除此处的日志记录
+            # logger.info(f"贝叶斯模型拟合完成")  <-- 注释掉这行
+            
+            # 返回self便于链式调用
+            return self
+            
+        except Exception as e:
+            logger.exception(f"MCMC采样失败: {str(e)}")
+            raise ValueError(f"贝叶斯模型拟合失败: {str(e)}")
     
     def _calculate_r_squared(self):
         """
@@ -1843,139 +2100,672 @@ class BayesianValueAddedModel(BaseValueAddedModel):
         r_squared = 1 - (rss / tss)
         return r_squared
     
-    def _predict_impl(self, new_data):
+    def _validate_data(self):
         """
-        贝叶斯模型预测实现
+        验证贝叶斯模型所需数据
+        
+        确保数据符合贝叶斯模型的要求，检查必要字段是否存在。
+        
+        Returns:
+            bool: 验证通过返回True
+            
+        Raises:
+            ValueError: 如果数据不符合要求
+        """
+        # 检查基础必要字段
+        required_fields = ['student_idx', 'standard_score', 'prior_score']
+        
+        # 贝叶斯模型特有字段
+        model_specific_fields = ['class_idx', 'school_idx']
+        
+        # 合并所有必要字段
+        all_required_fields = required_fields + model_specific_fields
+        
+        # 检查数据是否为空
+        if self.data is None or len(self.data) == 0:
+            raise ValueError("数据为空，无法进行贝叶斯模型分析")
+        
+        # 检查字段是否存在
+        missing_fields = [f for f in all_required_fields if f not in self.data.columns]
+        if missing_fields:
+            logger.warning(f"数据缺少贝叶斯模型必要字段: {missing_fields}")
+            return False
+        
+        # 检查数据量是否足够
+        if len(self.data) < 100:  # 贝叶斯模型通常需要足够的样本量
+            logger.warning(f"数据量可能不足({len(self.data)}条)，贝叶斯模型可能不稳定")
+        
+        # 检查数据类型
+        numeric_fields = ['standard_score', 'prior_score']
+        for field in numeric_fields:
+            if field in self.data.columns and not pd.api.types.is_numeric_dtype(self.data[field]):
+                raise ValueError(f"字段 {field} 必须是数值类型")
+        
+        return True
+
+    def _calculate_value_added_impl(self):
+        """
+        计算贝叶斯模型的增值效应
+        
+        从贝叶斯模型的MCMC采样结果中提取随机效应，计算各层级的增值分数
+        
+        Returns:
+            dict: 包含各层级增值效应的字典
+        """
+        import arviz as az
+        import pandas as pd
+        import numpy as np
+        
+        # 获取原始分数的标准差，用于还原效应尺度
+        score_std = np.std(self.data['standard_score'])
+        
+        # 提取班级效应并计算概要统计
+        class_value_added = az.summary(self.trace.posterior.class_effects)
+        class_value_added = class_value_added.rename(columns={'mean': 'effect', 'sd': 'std_dev',
+                                            'hdi_3%': 'lower', 'hdi_97%': 'upper'})
+        
+        # 调整效应尺度
+        class_value_added['effect'] = class_value_added['effect'] * score_std
+        class_value_added['std_dev'] = class_value_added['std_dev'] * score_std
+        class_value_added['lower'] = class_value_added['lower'] * score_std
+        class_value_added['upper'] = class_value_added['upper'] * score_std
+        
+        # 添加班级索引列
+        class_value_added['class_idx'] = class_value_added.index
+        
+        # 使用新创建的映射表添加班级详细信息
+        if hasattr(self, 'class_mapping') and not self.class_mapping.empty:
+            logger.info(f"使用class_mapping表添加班级详细信息，包含字段: {self.class_mapping.columns.tolist()}")
+            
+            # 将class_mapping的内容合并到结果中
+            class_mapping_df = self.class_mapping.reset_index()
+            
+            # 打印调试信息
+            logger.info(f"class_value_added['class_idx']类型: {class_value_added['class_idx'].dtype}")
+            logger.info(f"class_mapping_df['class_idx']类型: {class_mapping_df['class_idx'].dtype}")
+            
+            # 从字符串索引中提取数值索引
+            # 例如从'class_effects[0]'提取出0
+            if class_value_added['class_idx'].dtype == 'object':
+                try:
+                    # 尝试从字符串中提取索引数字
+                    class_value_added['numeric_idx'] = class_value_added['class_idx'].str.extract(r'\[(\d+)\]').astype(int)
+                    logger.info(f"从字符串索引中提取了数值索引")
+                    
+                    # 用提取的数值索引进行合并
+                    class_value_added = class_value_added.merge(
+                        class_mapping_df, 
+                        left_on='numeric_idx',  # 使用提取的数值索引
+                        right_on='class_idx',   # 映射表中的数值索引
+                        how='left'
+                    )
+                    
+                    # 删除冗余列
+                    if 'class_idx_y' in class_value_added.columns:
+                        class_value_added = class_value_added.rename(columns={'class_idx_x': 'class_idx'})
+                        class_value_added = class_value_added.drop(columns=['class_idx_y'])
+                        
+                    logger.info(f"使用提取的数值索引完成合并")
+                except Exception as e:
+                    logger.warning(f"提取数值索引失败: {str(e)}")
+                    # 转换失败时，采用常规合并
+                    class_mapping_df['class_idx'] = class_mapping_df['class_idx'].astype(str)
+                    class_value_added = class_value_added.merge(
+                        class_mapping_df, 
+                        on='class_idx', 
+                        how='left'
+                    )
+            else:
+                # 常规类型转换和合并
+                class_mapping_df['class_idx'] = class_mapping_df['class_idx'].astype(class_value_added['class_idx'].dtype)
+                class_value_added = class_value_added.merge(
+                    class_mapping_df, 
+                    on='class_idx', 
+                    how='left'
+                )
+        
+        # 检查合并后的结果是否包含班级和学校名称
+        if class_value_added['class_name'].isna().any() or class_value_added['school_name'].isna().any():
+            missing_class = class_value_added['class_name'].isna().sum()
+            missing_school = class_value_added['school_name'].isna().sum()
+            logger.warning(f"合并后有{missing_class}个班级缺少名称，{missing_school}个班级缺少学校名称")
+            
+            # 记录一些示例来帮助调试
+            missing_examples = class_value_added[class_value_added['class_name'].isna()]['class_idx'].tolist()[:3]
+            logger.warning(f"缺少名称的班级索引示例: {missing_examples}")
+            
+            # 检查这些班级索引是否在映射表中
+            if missing_examples:
+                for idx in missing_examples:
+                    logger.warning(f"班级索引{idx}在映射表中: {idx in self.class_mapping.index}")
+        else:
+            # 回退到现有的逻辑
+            logger.warning("未找到班级映射表，尝试使用备用方法添加班级信息")
+            
+            # ...保留现有的备用逻辑...
+            if hasattr(self, 'class_info') and isinstance(self.class_info, pd.DataFrame):
+                logger.info(f"使用存储的班级映射信息添加详细数据")
+                # 使用存储的映射信息
+                for col in self.class_info.columns:
+                    if col != 'class_idx':  # 避免重复添加class_idx
+                        class_value_added[col] = class_value_added['class_idx'].map(
+                            self.class_info[col]
+                        )
+                logger.info(f"从存储的映射添加了列: {self.class_info.columns.tolist()}")
+        
+        # 排序和添加排名
+        class_value_added = class_value_added.sort_values('effect', ascending=False)
+        class_value_added['rank'] = np.arange(1, len(class_value_added) + 1)
+        
+        # 记录效应统计信息
+        logger.info(f"班级增值效应范围: {class_value_added['effect'].min():.4f} 到 {class_value_added['effect'].max():.4f}")
+        logger.info(f"班级效应表最终字段: {class_value_added.columns.tolist()}")
+        
+        # 学校增值效应 - 使用新的映射表
+        if hasattr(self.trace.posterior, 'school_effects'):
+            school_value_added = az.summary(self.trace.posterior.school_effects)
+            school_value_added = school_value_added.rename(columns={'mean': 'effect', 'sd': 'std_dev',
+                                                       'hdi_3%': 'lower', 'hdi_97%': 'upper'})
+            
+            # 调整效应尺度
+            school_value_added['effect'] = school_value_added['effect'] * score_std
+            school_value_added['std_dev'] = school_value_added['std_dev'] * score_std
+            school_value_added['lower'] = school_value_added['lower'] * score_std
+            school_value_added['upper'] = school_value_added['upper'] * score_std
+            
+            # 添加学校索引列
+            school_value_added['school_idx'] = school_value_added.index
+            
+            # 使用新创建的学校映射表
+            if hasattr(self, 'school_mapping') and not self.school_mapping.empty:
+                logger.info(f"使用school_mapping表添加学校详细信息，包含字段: {self.school_mapping.columns.tolist()}")
+                
+                # 将school_mapping的内容合并到结果中
+                school_mapping_df = self.school_mapping.reset_index()
+                
+                # 从字符串索引中提取数值索引
+                if school_value_added['school_idx'].dtype == 'object':
+                    try:
+                        # 提取索引数字
+                        school_value_added['numeric_idx'] = school_value_added['school_idx'].str.extract(r'\[(\d+)\]').astype(int)
+                        
+                        # 用提取的数值索引进行合并
+                        school_value_added = school_value_added.merge(
+                            school_mapping_df, 
+                            left_on='numeric_idx',
+                            right_on='school_idx',
+                            how='left'
+                        )
+                        
+                        # 删除冗余列
+                        if 'school_idx_y' in school_value_added.columns:
+                            school_value_added = school_value_added.rename(columns={'school_idx_x': 'school_idx'})
+                            school_value_added = school_value_added.drop(columns=['school_idx_y'])
+                    except Exception as e:
+                        logger.warning(f"提取学校数值索引失败: {str(e)}")
+                        school_mapping_df['school_idx'] = school_mapping_df['school_idx'].astype(str)
+                        school_value_added = school_value_added.merge(
+                            school_mapping_df, 
+                            on='school_idx', 
+                            how='left'
+                        )
+                else:
+                    # 常规类型转换和合并
+                    school_mapping_df['school_idx'] = school_mapping_df['school_idx'].astype(school_value_added['school_idx'].dtype)
+                    school_value_added = school_value_added.merge(
+                        school_mapping_df, 
+                        on='school_idx', 
+                        how='left'
+                    )
+            else:
+                # 回退到现有逻辑
+                logger.warning("未找到学校映射表，尝试使用备用方法添加学校信息")
+                # ...保留现有的备用逻辑...
+            
+            # 排序和添加排名
+            school_value_added = school_value_added.sort_values('effect', ascending=False)
+            school_value_added['rank'] = np.arange(1, len(school_value_added) + 1)
+            
+            if len(school_value_added) > 0:
+                logger.info(f"学校增值效应范围: {school_value_added['effect'].min():.4f} 到 {school_value_added['effect'].max():.4f}")
+        else:
+            logger.warning("模型中没有学校效应")
+            school_value_added = pd.DataFrame()
+        
+        # 学生增值效应 - 使用同样的映射逻辑
+        if hasattr(self.trace.posterior, 'student_effects'):
+            student_value_added = az.summary(self.trace.posterior.student_effects)
+            student_value_added = student_value_added.rename(columns={'mean': 'effect', 'sd': 'std_dev',
+                                                        'hdi_3%': 'lower', 'hdi_97%': 'upper'})
+            
+            # 调整效应尺度
+            student_value_added['effect'] = student_value_added['effect'] * score_std
+            student_value_added['std_dev'] = student_value_added['std_dev'] * score_std
+            student_value_added['lower'] = student_value_added['lower'] * score_std
+            student_value_added['upper'] = student_value_added['upper'] * score_std
+            
+            # 添加学生索引列
+            student_value_added['student_idx'] = student_value_added.index
+            
+            # 添加学生信息
+            if 'student_idx' in self.data.columns:
+                student_id_map = self.data.drop_duplicates('student_idx').set_index('student_idx')
+                for col in ['student_id', 'student_name', 'class_id', 'school_id', 'class_idx', 'school_idx']:
+                    if col in student_id_map.columns:
+                        student_value_added[col] = student_value_added['student_idx'].map(
+                            student_id_map[col]
+                        )
+            
+            # 排序和添加排名
+            student_value_added = student_value_added.sort_values('effect', ascending=False)
+            student_value_added['rank'] = np.arange(1, len(student_value_added) + 1)
+            
+            # 如果缺少学生ID，创建简单标识符
+            if 'student_id' not in student_value_added.columns:
+                logger.warning("未找到学生ID映射，将使用索引作为学生ID")
+                student_value_added['student_id'] = [f"学生{i+1}" for i in range(len(student_value_added))]
+                student_value_added['student_name'] = student_value_added['student_id']
+            
+            if len(student_value_added) > 0:
+                logger.info(f"学生增值效应范围: {student_value_added['effect'].min():.4f} 到 {student_value_added['effect'].max():.4f}")
+        else:
+            logger.warning("模型中没有学生效应")
+            student_value_added = pd.DataFrame()
+        
+        return {
+            'schools': school_value_added,
+            'classes': class_value_added,
+            'students': student_value_added if 'student_value_added' in locals() else pd.DataFrame()
+        }
+
+    def _predict_impl(self, new_data=None):
+        """
+        使用拟合后的贝叶斯模型进行预测
         
         Args:
-            new_data: 用于预测的数据
+            new_data: 新数据，如果为None则使用拟合时的数据
             
         Returns:
-            ndarray: 预测结果
+            DataFrame: 包含预测结果的数据框
         """
-        # 获取参数后验均值
-        intercept = float(self.trace.posterior.intercept.mean())
-        beta_prior = float(self.trace.posterior.beta_prior.mean())
+        if self.trace is None:
+            raise ValueError("模型尚未拟合，请先调用fit()方法")
         
-        # 计算固定效应部分预测值
-        predictions = intercept + beta_prior * new_data['prior_score'].values
+        # 使用原始数据还是新数据
+        predict_data = new_data if new_data is not None else self.data
         
-        # 如果新数据包含学生、班级、学校索引，添加随机效应
-        if 'student_idx' in new_data.columns:
-            student_effects = self.trace.posterior.student_effects.mean(dim=("chain", "draw")).values
-            for i, student_idx in enumerate(new_data['student_idx']):
-                if student_idx < len(student_effects):
-                    predictions[i] += student_effects[student_idx]
+        # 获取模型参数后验均值
+        intercept = float(self.trace.posterior['intercept'].mean(dim=['chain', 'draw']).values)
+        beta_prior = float(self.trace.posterior['beta_prior'].mean(dim=['chain', 'draw']).values)
         
-        if 'class_idx' in new_data.columns:
-            class_effects = self.trace.posterior.class_effects.mean(dim=("chain", "draw")).values
-            for i, class_idx in enumerate(new_data['class_idx']):
-                if class_idx < len(class_effects):
-                    predictions[i] += class_effects[class_idx]
+        # 基础预测（仅使用固定效应）
+        predictions = intercept + beta_prior * predict_data['prior_score']
         
-        if 'school_idx' in new_data.columns and hasattr(self.trace.posterior, 'school_effects'):
-            school_effects = self.trace.posterior.school_effects.mean(dim=("chain", "draw")).values
-            for i, school_idx in enumerate(new_data['school_idx']):
-                if school_idx < len(school_effects):
-                    predictions[i] += school_effects[school_idx]
+        # 如果是原始数据，添加随机效应
+        if new_data is None:
+            # 学生效应
+            if 'student_effects' in self.trace.posterior and 'student_idx' in predict_data.columns:
+                student_effects = self.trace.posterior['student_effects'].mean(dim=['chain', 'draw']).values
+                predictions += student_effects[predict_data['student_idx'].values]
+            
+            # 班级效应
+            if 'class_effects' in self.trace.posterior and 'class_idx' in predict_data.columns:
+                class_effects = self.trace.posterior['class_effects'].mean(dim=['chain', 'draw']).values
+                predictions += class_effects[predict_data['class_idx'].values]
+            
+            # 学校效应
+            if 'school_effects' in self.trace.posterior and 'school_idx' in predict_data.columns:
+                school_effects = self.trace.posterior['school_effects'].mean(dim=['chain', 'draw']).values
+                predictions += school_effects[predict_data['school_idx'].values]
         
-        return predictions
-    
-    def _calculate_value_added_impl(self):
+        # 创建结果数据框
+        results = predict_data.copy()
+        results['predicted_score'] = predictions
+        
+        # 计算残差
+        if 'standard_score' in results.columns:
+            results['residual'] = results['standard_score'] - results['predicted_score']
+        
+        return results
+
+    def get_posterior_summary(self):
+        """
+        获取模型参数后验分布的统计概要
+        
+        Returns:
+            DataFrame: 包含参数后验分布统计量的数据框
+        """
+        if self.trace is None:
+            raise ValueError("模型尚未拟合，请先调用fit()方法")
+        
+        # 使用Arviz提取后验统计量
+        summary = az.summary(self.trace)
+        
+        # 添加参数类型标签
+        param_types = []
+        for param in summary.index:
+            if param.startswith('intercept') or param.startswith('beta'):
+                param_types.append('固定效应')
+            elif param.startswith('sigma'):
+                param_types.append('方差组件')
+            elif 'effects' in param:
+                if 'school' in param:
+                    param_types.append('学校随机效应')
+                elif 'class' in param:
+                    param_types.append('班级随机效应')
+                elif 'student' in param:
+                    param_types.append('学生随机效应')
+                else:
+                    param_types.append('随机效应')
+            else:
+                param_types.append('其他参数')
+        
+        # 添加参数类型列
+        summary['param_type'] = param_types
+        
+        return summary
+
+    def save_results(self, output_dir, filename_prefix="bayesian_value_added", value_added=None):
+        """
+        保存贝叶斯模型结果
+        
+        Args:
+            output_dir: 输出目录路径
+            filename_prefix: 文件名前缀
+            value_added: 预先计算的增值效应，如果提供则不会重新计算
+            
+        Returns:
+            dict: 包含已保存文件路径的字典
+        """
+        # 确保目录存在
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 保存文件路径字典
+        saved_paths = {}
+        
+        # 1. 保存模型参数
+        try:
+            # 获取后验分布摘要
+            posterior_summary = self.get_posterior_summary()
+            summary_path = os.path.join(output_dir, f"{filename_prefix}_posterior_summary.csv")
+            posterior_summary.to_csv(summary_path)
+            saved_paths['posterior_summary'] = summary_path
+            
+            # 保存参数后验图
+            if self.trace is not None:
+                # 保存trace图
+                try:
+                    import arviz as az
+                    
+                    # 增加rcParams设置，处理大量变量
+                    plt.rcParams['plot.max_subplots'] = 100  # 增加子图数量限制
+                    
+                    # 只选择关键参数进行可视化，避免太多变量
+                    key_params = []
+                    if 'intercept' in self.trace.posterior:
+                        key_params.append('intercept')
+                    if 'beta_prior' in self.trace.posterior:
+                        key_params.append('beta_prior')
+                    if 'sigma_student' in self.trace.posterior:
+                        key_params.append('sigma_student')
+                    if 'sigma_class' in self.trace.posterior:
+                        key_params.append('sigma_class')
+                    if 'sigma_school' in self.trace.posterior:
+                        key_params.append('sigma_school')
+                    if 'sigma_e' in self.trace.posterior:
+                        key_params.append('sigma_e')
+                    
+                    # 保存后验密度图（只包含关键参数）
+                    posterior_plot_path = os.path.join(output_dir, f"{filename_prefix}_posterior_plot.png")
+                    az.plot_posterior(self.trace, var_names=key_params)
+                    plt.savefig(posterior_plot_path, dpi=300, bbox_inches='tight')
+                    plt.close()
+                    saved_paths['posterior_plot'] = posterior_plot_path
+                    
+                    # 保存轨迹图（只包含关键参数）
+                    trace_plot_path = os.path.join(output_dir, f"{filename_prefix}_trace_plot.png")
+                    az.plot_trace(self.trace, var_names=key_params)
+                    plt.savefig(trace_plot_path, dpi=300, bbox_inches='tight')
+                    plt.close()
+                    saved_paths['trace_plot'] = trace_plot_path
+                    
+                    # 保存forest图（只包含关键参数）
+                    forest_plot_path = os.path.join(output_dir, f"{filename_prefix}_forest_plot.png")
+                    az.plot_forest(self.trace, var_names=key_params)
+                    plt.savefig(forest_plot_path, dpi=300, bbox_inches='tight')
+                    plt.close()
+                    saved_paths['forest_plot'] = forest_plot_path
+                    
+                    logger.info(f"已保存后验分布图: {posterior_plot_path}")
+                except Exception as e:
+                    logger.warning(f"保存后验分布图时出错: {str(e)}")
+        except Exception as e:
+            logger.warning(f"保存模型参数时出错: {str(e)}")
+        
+        # 2. 保存增值效应
+        try:
+            # 使用传入的值或重新计算
+            if value_added is None:
+                logger.info("没有提供预计算的增值效应，开始计算...")
+                value_added = self.calculate_value_added()
+            else:
+                logger.info("使用预先计算的增值效应，跳过重复计算")
+            
+            for level, df in value_added.items():
+                if not df.empty:
+                    va_path = os.path.join(output_dir, f"{filename_prefix}_{level}_effects.csv")
+                    df.to_csv(va_path, index=False)
+                    saved_paths[f"{level}_effects"] = va_path
+                    logger.info(f"已保存{level}增值效应: {va_path}")
+        except Exception as e:
+            logger.warning(f"保存增值效应时出错: {str(e)}")
+        
+        # 3. 安全地保存预测结果
+        try:
+            # 只有在模型已拟合且有predict方法时尝试
+            if hasattr(self, 'result') and self.result is not None and hasattr(self, 'predict'):
+                predictions = self.predict()
+                pred_path = os.path.join(output_dir, f"{filename_prefix}_predictions.csv")
+                
+                # 只保存关键列，以节省空间
+                pred_columns = ['student_id', 'student_name', 'class_id', 'standard_score', 
+                               'prior_score', 'predicted_score', 'residual']
+                pred_columns = [col for col in pred_columns if col in predictions.columns]
+                
+                predictions[pred_columns].to_csv(pred_path, index=False)
+                saved_paths['predictions'] = pred_path
+                logger.info(f"已保存预测结果: {pred_path}")
+            else:
+                logger.info("跳过预测结果保存：模型未完全拟合或缺少predict方法")
+        except Exception as e:
+            logger.warning(f"保存预测结果时出错: {str(e)}")
+        
+        # 4. 安全地保存模型评估指标
+        try:
+            # 先检查evaluate_model方法是否存在
+            if hasattr(self, 'evaluate_model'):
+                metrics = self.evaluate_model()
+                metrics_path = os.path.join(output_dir, f"{filename_prefix}_metrics.json")
+                with open(metrics_path, 'w') as f:
+                    json.dump(metrics, f, indent=4)
+                saved_paths['metrics'] = metrics_path
+                logger.info(f"已保存评估指标: {metrics_path}")
+            elif hasattr(self, 'get_metrics') and callable(self.get_metrics):
+                # 尝试使用备用方法
+                metrics = self.get_metrics()
+                if metrics:
+                    metrics_path = os.path.join(output_dir, f"{filename_prefix}_metrics.json")
+                    with open(metrics_path, 'w') as f:
+                        json.dump(metrics, f, indent=4)
+                    saved_paths['metrics'] = metrics_path
+                    logger.info(f"已保存评估指标(来自get_metrics): {metrics_path}")
+            else:
+                logger.info("跳过评估指标保存：模型没有evaluate_model或get_metrics方法")
+        except Exception as e:
+            logger.warning(f"保存评估指标时出错: {str(e)}")
+        
+        # 5. 保存模型配置
+        try:
+            config = {
+                'mcmc_samples': self.mcmc_samples,
+                'tune': self.tune,
+                'random_seed': self.random_seed,
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'data_shape': self.data.shape if self.data is not None else None,
+                'model_type': 'BayesianValueAddedModel'
+            }
+            
+            config_path = os.path.join(output_dir, f"{filename_prefix}_config.json")
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=4)
+            saved_paths['config'] = config_path
+            logger.info(f"已保存模型配置: {config_path}")
+        except Exception as e:
+            logger.warning(f"保存模型配置时出错: {str(e)}")
+        
+        return saved_paths
+
+    def calculate_value_added(self):
         """
         计算贝叶斯模型的增值效应
         
         Returns:
             dict: 包含各层级增值效应的字典
         """
-        # 班级增值效应
-        class_value_added = az.summary(self.trace.posterior.class_effects)
-        class_value_added = class_value_added.rename(columns={'mean': 'mean', 'sd': 'std', 
-                                                     'hdi_3%': 'lower', 'hdi_97%': 'upper'})
-        
-        # 将索引映射回原始ID
-        if 'norm_class_group' in self.data.columns:
-            class_map = self.data.groupby('class_idx')['norm_class_group'].first().to_dict()
-            class_value_added.index = class_value_added.index.map(lambda x: class_map.get(x, x))
-        
-        # 学校增值效应
-        if 'school_idx' in self.data.columns:
-            school_value_added = az.summary(self.trace.posterior.school_effects)
-            school_value_added = school_value_added.rename(columns={'mean': 'mean', 'sd': 'std', 
-                                                          'hdi_3%': 'lower', 'hdi_97%': 'upper'})
-            
-            # 将索引映射回原始ID
-            if 'school_id' in self.data.columns:
-                school_map = self.data.groupby('school_idx')['school_id'].first().to_dict()
-                school_value_added.index = school_value_added.index.map(lambda x: school_map.get(x, x))
+        # 如果已经拟合模型，调用实现方法
+        if hasattr(self, 'trace') and self.trace is not None:
+            return self._calculate_value_added_impl()
         else:
-            school_value_added = pd.DataFrame()
+            logger.warning("模型尚未拟合，无法计算增值效应")
+            return {
+                'schools': pd.DataFrame(),
+                'classes': pd.DataFrame(),
+                'students': pd.DataFrame()
+            }
+
+    def diagnose_sampling(self):
+        """诊断MCMC采样质量并提供建议"""
+        import arviz as az
+        import numpy as np
         
-        # 学生增值效应
-        student_value_added = az.summary(self.trace.posterior.student_effects)
-        student_value_added = student_value_added.rename(columns={'mean': 'mean', 'sd': 'std', 
-                                                        'hdi_3%': 'lower', 'hdi_97%': 'upper'})
+        if not hasattr(self, 'trace') or self.trace is None:
+            return {"error": "尚未进行MCMC采样"}
         
-        # 将索引映射回原始ID
-        if 'student_id' in self.data.columns:
-            student_map = self.data.groupby('student_idx')['student_id'].first().to_dict()
-            student_value_added.index = student_value_added.index.map(lambda x: student_map.get(x, x))
+        # 获取诊断信息
+        divergences = int(np.sum(self.trace.sample_stats.diverging.values))
+        accept = float(self.trace.sample_stats.accept.mean())
+        try:
+            rhat_values = az.rhat(self.trace)
+            max_rhat = float(rhat_values.max())
+            problem_params = rhat_values[rhat_values > 1.05].index.tolist()
+        except:
+            max_rhat = float('nan')
+            problem_params = []
         
-        return {
-            'schools': school_value_added,
-            'classes': class_value_added,
-            'students': student_value_added
+        # 生成诊断报告
+        diagnosis = {
+            "divergences": divergences,
+            "acceptance_rate": accept,
+            "max_rhat": max_rhat,
+            "problem_parameters": problem_params
         }
-    
-    def save_results(self, output_dir, filename_prefix="bayesian_value_added"):
-        """
-        保存贝叶斯模型结果
         
-        Args:
-            output_dir: 输出目录
-            filename_prefix: 文件名前缀
-            
+        # 添加警告和建议
+        warnings = []
+        if divergences > 0:
+            warnings.append(f"存在{divergences}个发散样本，可能影响参数估计")
+        if max_rhat > 1.05:
+            warnings.append(f"最大Rhat值为{max_rhat:.4f}，超过1.05，链可能未收敛")
+        if problem_params:
+            warnings.append(f"以下参数可能存在问题: {', '.join(problem_params[:5])}")
+        
+        diagnosis["warnings"] = warnings
+        diagnosis["sampling_ok"] = (divergences == 0 and max_rhat <= 1.05)
+        
+        return diagnosis
+
+    def get_export_field_mapping(self):
+        """
+        获取贝叶斯模型导出字段映射
+        
         Returns:
-            dict: 保存的文件路径
+            dict: 包含字段映射的字典
         """
-        # 创建输出目录
-        os.makedirs(output_dir, exist_ok=True)
+        return {
+            'common': {  # 所有层级通用映射
+                'effect': '增值效应',
+                'std_dev': '标准误',
+                'lower': '置信区间下限',
+                'upper': '置信区间上限',
+                'rank': '排名'
+            },
+            'classes': {  # 班级特定映射
+                'class_id': '班级ID',
+                'class_name': '班级名称',
+                'school_name': '所属学校',
+                # 其他班级特有字段
+            },
+            'schools': {
+                'school_id': '学校ID',
+                'school_name': '学校名称',
+                # 其他学校特有字段
+            },
+            'students': {
+                'student_id': '学生ID',
+                'student_name': '学生姓名',
+                # 其他学生特有字段
+            }
+        }
+
+    def evaluate_model(self):
+        """
+        评估贝叶斯模型性能
         
-        # 保存结果
-        saved_paths = {}
+        Returns:
+            dict: 包含评估指标的字典
+        """
+        if self.metrics:
+            return self.metrics
         
-        # 保存模型摘要
-        summary_path = os.path.join(output_dir, f"{filename_prefix}_summary.csv")
-        az.summary(self.trace).to_csv(summary_path)
-        saved_paths["summary"] = summary_path
+        # 如果没有缓存的指标，执行评估
+        metrics = {}
         
-        # 保存模型跟踪
-        trace_path = os.path.join(output_dir, f"{filename_prefix}_trace.nc")
-        self.trace.to_netcdf(trace_path)
-        saved_paths["trace"] = trace_path
+        if hasattr(self, 'result') and self.result is not None:
+            try:
+                # 使用后验预测检查
+                import arviz as az
+                
+                # 获取一些拟合质量指标
+                if hasattr(self.trace, 'sample_stats'):
+                    metrics['mean_log_likelihood'] = float(self.trace.sample_stats.lp.mean().item())
+                    
+                # 包括预测性能指标
+                if hasattr(self, 'predict'):
+                    try:
+                        predictions = self.predict()
+                        if 'residual' in predictions.columns:
+                            metrics['rmse'] = np.sqrt(np.mean(predictions['residual']**2))
+                            metrics['mae'] = np.mean(np.abs(predictions['residual']))
+                    except Exception:
+                        pass  # 预测失败不影响其他评估
+                    
+                # Arviz提供的收敛诊断
+                if hasattr(self.trace, 'posterior'):
+                    try:
+                        ess_bulk = az.ess(self.trace, var_names=['class_effects']).to_dataframe().mean().item()
+                        r_hat = az.rhat(self.trace, var_names=['class_effects']).to_dataframe().mean().item()
+                        
+                        metrics['ess_bulk_mean'] = float(ess_bulk)
+                        metrics['r_hat_mean'] = float(r_hat)
+                        metrics['convergence_good'] = bool(r_hat < 1.05)
+                    except Exception:
+                        pass  # 诊断失败不影响其他指标
+            except Exception as e:
+                logger.warning(f"评估模型时出错: {str(e)}")
         
-        # 保存后验分布图
-        post_path = os.path.join(output_dir, f"{filename_prefix}_posterior.png")
-        az.plot_posterior(self.trace, var_names=['intercept', 'beta_prior'])
-        plt.tight_layout()
-        plt.savefig(post_path, dpi=300)
-        saved_paths["posterior_plot"] = post_path
-        
-        # 保存增值效应
-        value_added = self.calculate_value_added()
-        for level, df in value_added.items():
-            if not df.empty:
-                va_path = os.path.join(output_dir, f"{filename_prefix}_{level}_value_added.csv")
-                df.to_csv(va_path)
-                saved_paths[f"{level}_value_added"] = va_path
-        
-        # 保存评估指标
-        metrics_path = os.path.join(output_dir, f"{filename_prefix}_metrics.json")
-        with open(metrics_path, 'w') as f:
-            json.dump(self.metrics, f, indent=4)
-        saved_paths["metrics"] = metrics_path
-        
-        return saved_paths
+        # 缓存结果
+        self.metrics = metrics
+        return metrics
 
 
 class FixedEffectsValueAddedModel(BaseValueAddedModel):
@@ -2430,49 +3220,29 @@ class TVAMValueAddedModel(BaseValueAddedModel):
     """传统增值评估模型(TVAM)实现"""
     
     def prepare_data(self, data=None):
-        """
-        准备TVAM模型特定的数据
+        """准备TVAM模型数据"""
+        if data is not None:
+            self.raw_data = data
         
-        处理包括:
-        - 计算前测成绩
-        - 创建分类索引
-        - 标准化分数
-        - 验证数据完整性
+        if self.raw_data is None:
+            raise ValueError("请提供数据")
         
-        Args:
-            data: 输入数据，如果为None则使用初始化时的数据
-            
-        Returns:
-            DataFrame: 准备好的建模数据
-        """
-        # 首先调用基类的prepare_data获取基础处理后的数据
-        # 这已经包含了前测后测处理、过滤前测数据、创建数值索引等通用步骤
-        model_data = super().prepare_data(data)
+        # 获取基线考试ID
+        baseline_exam = getattr(self.data_processor, 'baseline_exam', None)
         
-        # 获取数据处理工具
-        processors = self.data_processor.get_data_processors()
+        # 复制原始数据
+        model_data = self.raw_data.copy()
+        
+        # 前测后测处理
+        model_data = self._process_pre_post_tests(model_data, baseline_exam)
         
         # 显示处理前的数据信息
         logger.info(f"TVAM模型准备数据，接收的数据字段: {sorted(model_data.columns.tolist())}")
         logger.info(f"数据样本（前3行）:\n{model_data.head(3)}")
         
-
-        
-        # 检查真实班级数量（TVAM特别关注）
-        if 'class_idx' in model_data.columns:
-            num_classes = model_data['class_idx'].nunique() 
-            logger.info(f"TVAM模型数据包含{num_classes}个班级")
-        
-        # TVAM特定的其他处理
-        # 例如，计算班级平均成绩作为协变量
-        if 'class_idx' in model_data.columns and 'prior_score' in model_data.columns:
-            class_means = model_data.groupby('class_idx')['prior_score'].mean().reset_index()
-            class_means.columns = ['class_idx', 'class_mean_prior']
-            model_data = pd.merge(model_data, class_means, on='class_idx', how='left')
-            logger.info("已添加班级平均前测成绩作为协变量")
-        
-        # 在方法结束前记录日志
-        logger.info(f"TVAM模型准备完成，数据字段: {sorted(model_data.columns.tolist())}")
+        # 创建数值索引和名称
+        model_data = self._create_numeric_indices(model_data)
+        model_data = self._ensure_names_and_ids(model_data)
         
         # 保存处理后的数据
         self.data = model_data
@@ -3528,4 +4298,955 @@ class NonlinearStudentPotentialEvaluator(BaseValueAddedModel):
             'breakthrough_count': breakthrough_count,
             'resilience': resilience
         }
+
+class TimeSeriesBayesianValueAddedModel(BaseValueAddedModel):
+    """
+    基于连续多次考试的贝叶斯增值评价模型。
+    
+    使用多次考试作为基线，采用贝叶斯多层线性模型估计增值效应。
+    支持两种指定基线的方式：
+    1. 按数量模式：自动使用最近的N次考试作为基线
+    2. 按考试ID模式：明确指定哪些考试作为基线
+    
+    Args:
+        baseline_exams_count: 用作基线的考试次数(数量模式)
+        decay_factor: 时间衰减因子(0-1之间)，控制较早考试的权重
+        use_exam_ids: 是否使用考试ID模式
+        baseline_exam_ids: 用作基线的考试ID列表(考试ID模式)
+        target_exam_id: 目标考试ID(考试ID模式)
+        
+    Returns:
+        贝叶斯估计的增值效应及其可信区间
+        
+    Raises:
+        ValueError: 当数据不足或参数错误时
+    """
+    
+    def __init__(self, baseline_exams_count=4, decay_factor=0.85, 
+                 use_exam_ids=False, baseline_exam_ids=None, target_exam_id=None, **kwargs):
+        super().__init__(**kwargs)
+        self.baseline_exams_count = baseline_exams_count
+        self.decay_factor = decay_factor
+        self.use_exam_ids = use_exam_ids
+        self.baseline_exam_ids = baseline_exam_ids
+        self.target_exam_id = target_exam_id
+        self.trace = None
+        self.model = None
+        self.processed_data = None
+    
+    # 实现BaseValueAddedModel要求的抽象方法
+    def _validate_data(self, data):
+        """
+        验证输入数据
+        
+        Args:
+            data: 输入数据
+            
+        Returns:
+            bool: 数据是否有效
+        """
+        # 验证必要的列
+        required_cols = ['student_id', 'class_id', 'school_id', 'exam_id', 'standard_score']
+        for col in required_cols:
+            if col not in data.columns:
+                logger.error(f"数据中缺少必要的列: {col}")
+                return False
+                
+        # 验证考试ID
+        if self.use_exam_ids:
+            # 确保所有指定的考试ID存在
+            all_exam_ids = data['exam_id'].unique()
+            missing_exams = []
+            
+            all_required_exams = self.baseline_exam_ids + [self.target_exam_id] if self.baseline_exam_ids else []
+            for exam_id in all_required_exams:
+                if exam_id and exam_id not in all_exam_ids:
+                    missing_exams.append(exam_id)
+            
+            if missing_exams:
+                logger.error(f"以下考试ID不存在于数据中: {', '.join(missing_exams)}")
+                return False
+                
+        return True
+    
+    def _build_model(self, data):
+        """
+        构建贝叶斯多层次模型
+        
+        Args:
+            data: 处理后的数据
+            
+        Returns:
+            构建的模型
+        """
+        # 处理数据
+        self.processed_data = self.prepare_data(data)
+        
+        # 使用现有的build_model方法
+        self.model = self.build_model(self.processed_data)
+        return self.model
+    
+    def _fit_model(self, data, **kwargs):
+        """
+        拟合模型
+        
+        Args:
+            data: 输入数据
+            **kwargs: 其他参数
+            
+        Returns:
+            拟合结果
+        """
+        import pymc as pm
+        import arviz as az
+        
+        # 如果模型未创建，先创建模型
+        if self.model is None:
+            self._build_model(data)
+        
+        # 设置MCMC采样参数
+        sample_kwargs = {
+            'draws': 2000,
+            'tune': 1000,
+            'chains': 4,
+            'cores': 4,
+            'return_inferencedata': True,
+            'random_seed': 42
+        }
+        # 更新用户参数
+        sample_kwargs.update(kwargs)
+        
+        # 执行采样
+        with self.model:
+            self.trace = pm.sample(**sample_kwargs)
+        
+        return self.trace
+    
+    def _calculate_value_added_impl(self, **kwargs):
+        """
+        计算增值效应
+        
+        Args:
+            **kwargs: 其他参数
+            
+        Returns:
+            增值效应结果
+        """
+        # 确保已经有拟合结果
+        if self.trace is None or self.processed_data is None:
+            raise ValueError("必须先拟合模型才能计算增值效应")
+            
+        # 使用现有的_calculate_value_added方法
+        return self._calculate_value_added(self.trace, self.processed_data)
+    
+    def _predict_impl(self, data, **kwargs):
+        """
+        预测新数据的结果
+        
+        Args:
+            data: 新数据
+            **kwargs: 其他参数
+            
+        Returns:
+            预测结果
+        """
+        import pymc as pm
+        import arviz as az
+        
+        # 确保已经拟合过模型
+        if self.trace is None or self.model is None:
+            raise ValueError("必须先拟合模型才能进行预测")
+            
+        # 准备预测数据
+        pred_data = self.prepare_data(data)
+        
+        # 提取后验分布的参数均值
+        posterior_means = az.summary(self.trace).loc[:, 'mean']
+        
+        # 获取索引映射
+        school_idx = pd.Categorical(pred_data['school_id']).codes
+        class_idx = pd.Categorical(pred_data['class_id']).codes
+        
+        # 提取模型系数
+        beta_0 = posterior_means['beta_0']
+        beta_1 = posterior_means['beta_1']
+        beta_trend = posterior_means['beta_trend']
+        
+        # 计算趋势特征
+        trend_features = []
+        for i in range(len(pred_data)):
+            scores = pred_data['baseline_scores'].iloc[i]
+            trend = (scores[-1] - scores[0]) / len(scores)
+            trend_features.append(trend)
+        
+        trend_features = np.array(trend_features)
+        
+        # 获取学校和班级效应
+        school_effects = np.array([posterior_means[f'school_effects[{i}]'] 
+                                 for i in range(len(set(school_idx)))])
+        class_effects = np.array([posterior_means[f'class_effects[{i}]'] 
+                                for i in range(len(set(class_idx)))])
+        
+        # 计算预测值
+        predictions = (beta_0 + 
+                      beta_1 * pred_data['weighted_baseline'].values + 
+                      beta_trend * trend_features +
+                      school_effects[school_idx] + 
+                      class_effects[class_idx])
+        
+        return predictions
+    
+    # 保留原有方法
+    def prepare_data(self, data):
+        """
+        准备多时间点基线的增值分析数据。
+        
+        Args:
+            data: 原始成绩数据DataFrame
+            
+        Returns:
+            处理后的数据
+        """
+        if self.use_exam_ids:
+            return self._prepare_data_by_exam_ids(data)
+        else:
+            return self._prepare_data_by_count(data)
+    
+    def _prepare_data_by_count(self, data):
+        """按最近N次考试准备数据"""
+        # 验证每个学生有足够的历史成绩
+        student_counts = data.groupby('student_id').size()
+        valid_students = student_counts[student_counts >= self.baseline_exams_count + 1].index
+        
+        if len(valid_students) == 0:
+            raise ValueError(f"没有学生同时具有{self.baseline_exams_count}次基线考试和目标考试的成绩")
+        
+        filtered_data = data[data['student_id'].isin(valid_students)].copy()
+        
+        # 按学生和考试日期排序
+        filtered_data.sort_values(['student_id', 'exam_date'], inplace=True)
+        
+        # 为每个学生构建基线数据
+        baseline_data = []
+        
+        for student_id, student_data in filtered_data.groupby('student_id'):
+            # 确保至少有基线次数+1条记录
+            if len(student_data) < self.baseline_exams_count + 1:
+                continue
+                
+            # 提取基线考试和目标考试
+            baseline_scores = student_data.iloc[:self.baseline_exams_count]['standard_score'].values
+            target_score = student_data.iloc[self.baseline_exams_count]['standard_score']
+            
+            # 记录学生信息
+            student_info = {
+                'student_id': student_id,
+                'class_id': student_data['class_id'].iloc[0],
+                'school_id': student_data['school_id'].iloc[0],
+                'baseline_scores': baseline_scores,
+                'weighted_baseline': self._calculate_weighted_baseline(baseline_scores),
+                'target_score': target_score
+            }
+            
+            baseline_data.append(student_info)
+            
+        processed_data = pd.DataFrame(baseline_data)
+        return processed_data
+    
+    def _prepare_data_by_exam_ids(self, data):
+        """按指定考试ID准备数据"""
+        # 验证必要参数
+        if not self.baseline_exam_ids or not self.target_exam_id:
+            raise ValueError("使用考试ID模式时必须指定baseline_exam_ids和target_exam_id")
+            
+        # 确保目标考试不在基线考试中
+        if self.target_exam_id in self.baseline_exam_ids:
+            raise ValueError(f"目标考试({self.target_exam_id})不能在基线考试中")
+            
+        # 验证所有考试ID都存在于数据中
+        all_exam_ids = data['exam_id'].unique()
+        missing_exams = []
+        
+        for exam_id in self.baseline_exam_ids + [self.target_exam_id]:
+            if exam_id not in all_exam_ids:
+                missing_exams.append(exam_id)
+        
+        if missing_exams:
+            raise ValueError(f"以下考试ID不存在于数据中: {', '.join(missing_exams)}")
+            
+        # 过滤出目标考试和基线考试的数据
+        relevant_exams = self.baseline_exam_ids + [self.target_exam_id]
+        filtered_data = data[data['exam_id'].isin(relevant_exams)].copy()
+        
+        # 查找同时参加了所有相关考试的学生
+        student_exam_counts = filtered_data.groupby('student_id')['exam_id'].nunique()
+        valid_students = student_exam_counts[student_exam_counts == len(relevant_exams)].index
+        
+        if len(valid_students) == 0:
+            raise ValueError(f"没有学生同时参加了所有指定的考试")
+            
+        filtered_data = filtered_data[filtered_data['student_id'].isin(valid_students)]
+        
+        # 为每个学生构建基线数据
+        baseline_data = []
+        
+        for student_id, student_data in filtered_data.groupby('student_id'):
+            # 获取基线考试成绩
+            baseline_scores = []
+            for exam_id in self.baseline_exam_ids:
+                score = student_data[student_data['exam_id'] == exam_id]['standard_score'].values[0]
+                baseline_scores.append(score)
+                
+            # 获取目标考试成绩
+            target_score = student_data[student_data['exam_id'] == self.target_exam_id]['standard_score'].values[0]
+            
+            # 记录学生信息
+            student_info = {
+                'student_id': student_id,
+                'class_id': student_data['class_id'].iloc[0],
+                'school_id': student_data['school_id'].iloc[0],
+                'baseline_scores': np.array(baseline_scores),
+                'weighted_baseline': self._calculate_weighted_baseline(np.array(baseline_scores)),
+                'target_score': target_score
+            }
+            
+            baseline_data.append(student_info)
+            
+        processed_data = pd.DataFrame(baseline_data)
+        return processed_data
+    
+    def _calculate_weighted_baseline(self, scores):
+        """
+        计算基线分数的加权平均值，较近的考试权重更高。
+        
+        Args:
+            scores: 基线考试分数列表
+            
+        Returns:
+            加权平均分数
+        """
+        weights = np.array([self.decay_factor ** (len(scores) - i - 1) 
+                           for i in range(len(scores))])
+        weights = weights / weights.sum()  # 归一化权重
+        
+        return np.sum(scores * weights)
+    
+    def build_model(self, data):
+        """
+        构建基于多时间点基线的贝叶斯多层次模型。
+        
+        Args:
+            data: 处理后的数据
+            
+        Returns:
+            PyMC模型
+        """
+        import pymc as pm
+        
+        with pm.Model() as model:
+            # 获取索引
+            school_idx = pd.Categorical(data['school_id']).codes
+            class_idx = pd.Categorical(data['class_id']).codes
+            
+            # 先验分布
+            sigma_school = pm.HalfCauchy('sigma_school', beta=3)  
+            sigma_class = pm.HalfCauchy('sigma_class', beta=3)    
+            sigma = pm.HalfCauchy('sigma', beta=3)                
+            
+            # 随机效应
+            school_effects = pm.Normal('school_effects', mu=0, sigma=sigma_school, 
+                                      shape=len(set(school_idx)))
+            class_effects = pm.Normal('class_effects', mu=0, sigma=sigma_class, 
+                                     shape=len(set(class_idx)))
+            
+            # 固定效应 - 基线成绩系数
+            beta_0 = pm.Normal('beta_0', mu=0, sigma=10)  # 截距
+            beta_1 = pm.Normal('beta_1', mu=1, sigma=1)  # 基线成绩系数
+            
+            # 额外系数 - 基线趋势
+            beta_trend = pm.Normal('beta_trend', mu=0, sigma=1)
+            
+            # 计算趋势特征 (最后一次减第一次)/总次数
+            trend_feature = []
+            for i in range(len(data)):
+                scores = data['baseline_scores'].iloc[i]
+                trend = (scores[-1] - scores[0]) / len(scores)
+                trend_feature.append(trend)
+            
+            trend_feature = np.array(trend_feature)
+            
+            # 模型预测
+            mu = (beta_0 + 
+                  beta_1 * data['weighted_baseline'].values + 
+                  beta_trend * trend_feature +
+                  school_effects[school_idx] + 
+                  class_effects[class_idx])
+            
+            # 似然函数
+            y = pm.Normal('y', mu=mu, sigma=sigma, observed=data['target_score'].values)
+        
+        return model
+    
+    def fit(self, data, **kwargs):
+        """
+        拟合贝叶斯模型并计算增值效应。
+        
+        Args:
+            data: 处理后的数据
+            **kwargs: 传递给pm.sample的参数
+            
+        Returns:
+            拟合结果
+        """
+        # 验证数据
+        if not self._validate_data(data):
+            raise ValueError("数据验证失败")
+            
+        # 拟合模型
+        self.trace = self._fit_model(data, **kwargs)
+        
+        # 计算增值效应
+        self.results = self._calculate_value_added_impl()
+        return self.results
+    
+    def _calculate_value_added(self, trace, data):
+        """
+        计算增值效应及其不确定性。
+        
+        Args:
+            trace: MCMC采样痕迹
+            data: 处理后的数据
+            
+        Returns:
+            增值效应结果字典
+        """
+        import arviz as az
+        
+        # 提取后验分布
+        school_effects = az.extract(trace, var_names=["school_effects"])
+        class_effects = az.extract(trace, var_names=["class_effects"])
+        
+        # 计算学校和班级的增值效应
+        school_ids = data['school_id'].unique()
+        school_indices = {school_id: i for i, school_id in 
+                         enumerate(pd.Categorical(data['school_id']).categories)}
+        
+        class_ids = data['class_id'].unique()
+        class_indices = {class_id: i for i, class_id in 
+                        enumerate(pd.Categorical(data['class_id']).categories)}
+        
+        # 学校增值效应
+        school_value_added = {}
+        for school_id in school_ids:
+            idx = school_indices[school_id]
+            effect = school_effects[:, idx].mean()
+            ci_lower = np.percentile(school_effects[:, idx], 2.5)
+            ci_upper = np.percentile(school_effects[:, idx], 97.5)
+            
+            school_value_added[school_id] = {
+                'effect': effect,
+                'ci_lower': ci_lower,
+                'ci_upper': ci_upper,
+                'significant': (ci_lower > 0) or (ci_upper < 0)
+            }
+        
+        # 班级增值效应
+        class_value_added = {}
+        for class_id in class_ids:
+            idx = class_indices[class_id]
+            effect = class_effects[:, idx].mean()
+            ci_lower = np.percentile(class_effects[:, idx], 2.5)
+            ci_upper = np.percentile(class_effects[:, idx], 97.5)
+            
+            class_value_added[class_id] = {
+                'effect': effect,
+                'ci_lower': ci_lower,
+                'ci_upper': ci_upper,
+                'significant': (ci_lower > 0) or (ci_upper < 0)
+            }
+        
+        return {
+            'school_effects': school_value_added,
+            'class_effects': class_value_added,
+            'trace': trace,
+            'model_summary': az.summary(trace)
+        }
+
+class StudentProgressClusterAnalyzer(BaseValueAddedModel):
+    """
+    基于K-means聚类的学生进步模式分群分析模型
+    
+    通过分析学生在多次考试中的成绩变化模式，识别不同类型的学习轨迹。
+    
+    Args:
+        data: 包含学生考试成绩的数据框
+        data_processor: 数据处理器实例
+        n_clusters: 聚类数量，默认为4
+        min_exams: 模型所需的最少考试次数，默认为3
+        random_state: 随机种子，用于K-means算法
+        
+    Returns:
+        带有聚类标签和特征的分析结果
+    
+    Raises:
+        ValueError: 当数据不满足基本要求时抛出
+    """
+    
+    def __init__(self, data=None, data_processor=None, n_clusters=4, min_exams=3, random_state=42):
+        """
+        初始化学生进步模式聚类分析模型
+        
+        Args:
+            data: 原始数据DataFrame
+            data_processor: 数据处理器实例
+            n_clusters: 聚类数量，默认为4
+            min_exams: 模型所需的最少考试次数，默认为3
+            random_state: 随机种子，用于K-means算法
+        """
+        # 明确指定不需要前后测分离
+        super().__init__(data, data_processor)
+        self.n_clusters = n_clusters
+        self.min_exams = min_exams
+        self.random_state = random_state
+        self.cluster_model = None
+        self.features_df = None
+        self.cluster_profiles = None
+
+    def _extract_clustering_features(self):
+        """
+        从学生考试序列中提取用于聚类的特征
+        
+        提取的特征包括：
+        - 平均增长率：整体成绩变化的斜率
+        - 波动性：成绩的标准差
+        - 加速度：成绩变化速率的变化
+        - 最大进步：单次最大提升幅度
+        - 最大退步：单次最大下降幅度
+        - 起点水平：第一次考试的成绩
+        - 终点水平：最后一次考试的成绩
+        - 相对排名变化：排名的改变幅度
+        
+        Returns:
+            DataFrame: 包含学生ID和提取特征的数据框
+        """
+        # 初始化特征数据框
+        feature_data = []
+        
+        # 按学生分组处理数据
+        for student_id, group in self.data.groupby('student_id'):
+            # 按考试顺序排序
+            group = group.sort_values('exam_order')
+            
+            # 提取分数序列
+            scores = group['standard_score'].values
+            exams = np.arange(len(scores))
+            
+            # 计算特征
+            # 1. 平均增长率（线性回归斜率）
+            slope, intercept = np.polyfit(exams, scores, 1)
+            
+            # 2. 波动性（标准差）
+            volatility = np.std(scores)
+            
+            # 3. 加速度（二次拟合的二阶系数）
+            if len(scores) >= 3:
+                quad_coef = np.polyfit(exams, scores, 2)[0]
+            else:
+                quad_coef = 0
+                
+            # 4. 最大进步和退步
+            score_diffs = np.diff(scores)
+            max_improvement = np.max(score_diffs) if len(score_diffs) > 0 else 0
+            max_decline = np.min(score_diffs) if len(score_diffs) > 0 else 0
+            
+            # 5. 起点和终点水平
+            start_level = scores[0]
+            end_level = scores[-1]
+            
+            # 6. 总体提升幅度
+            total_improvement = end_level - start_level
+            
+            # 7. 计算相对于同考试的排名变化
+            if 'rank_in_exam' in group.columns:
+                start_rank = group['rank_in_exam'].iloc[0]
+                end_rank = group['rank_in_exam'].iloc[-1]
+                rank_change = start_rank - end_rank  # 排名提升为正
+            else:
+                rank_change = 0
+                
+            # 收集学生信息
+            student_info = self._extract_student_info(group)
+            
+            # 添加到特征列表
+            feature_data.append({
+                'student_id': student_id,
+                'student_name': student_info['student_name'],
+                'class_name': student_info['class_name'],
+                'school_name': student_info['school_name'],
+                'grade': student_info['grade'],
+                'growth_rate': slope,
+                'volatility': volatility,
+                'acceleration': quad_coef,
+                'max_improvement': max_improvement,
+                'max_decline': max_decline,
+                'start_level': start_level,
+                'end_level': end_level,
+                'total_improvement': total_improvement,
+                'rank_change': rank_change
+            })
+        
+        # 创建特征数据框
+        features_df = pd.DataFrame(feature_data)
+        
+        # 标准化数值特征用于聚类
+        numeric_features = ['growth_rate', 'volatility', 'acceleration', 
+                            'max_improvement', 'max_decline', 'start_level', 
+                            'end_level', 'total_improvement', 'rank_change']
+        
+        features_df_numeric = features_df[numeric_features].copy()
+        
+        # 使用StandardScaler进行特征标准化
+        from sklearn.preprocessing import StandardScaler
+        scaler = StandardScaler()
+        features_df_scaled = scaler.fit_transform(features_df_numeric)
+        
+        # 将标准化后的特征添加回数据框
+        features_df_scaled = pd.DataFrame(
+            features_df_scaled, 
+            columns=[f"{col}_scaled" for col in numeric_features],
+            index=features_df.index
+        )
+        
+        # 合并原始特征和标准化特征
+        self.features_df = pd.concat([features_df, features_df_scaled], axis=1)
+        
+        return self.features_df
+
+    def _interpret_clusters(self):
+        """
+        解释聚类结果，为每个聚类提供描述性标签和特征分析
+        
+        Returns:
+            dict: 聚类解释结果
+        """
+        # 获取每个聚类的均值特征
+        cluster_means = self.features_df.groupby('cluster').mean()
+        
+        # 定义聚类标签和解释
+        cluster_labels = {}
+        
+        for cluster_id in range(self.n_clusters):
+            # 获取该聚类的特征均值
+            cluster_profile = cluster_means.loc[cluster_id]
+            
+            # 根据特征分析确定标签和描述
+            if cluster_profile['growth_rate'] > 0.5:
+                if cluster_profile['volatility'] < 0:
+                    label = "稳定提升型"
+                    description = "该类学生展现出稳定持续的进步，波动小，成长稳健"
+                else:
+                    label = "突破成长型"
+                    description = "该类学生有显著的成绩提升，可能伴随一定波动"
+            elif cluster_profile['growth_rate'] > 0:
+                if cluster_profile['acceleration'] > 0:
+                    label = "后劲发力型"
+                    description = "该类学生前期进步较慢，后期展现加速上升趋势"
+                else:
+                    label = "平稳发展型"
+                    description = "该类学生进步幅度适中，较为平稳"
+            elif cluster_profile['max_improvement'] > 0.5:
+                label = "波动起伏型"
+                description = "该类学生成绩有明显波动，有显著进步也有退步"
+            elif cluster_profile['start_level'] > 0.5:
+                label = "高分稳定型"
+                description = "该类学生起点较高，保持相对稳定的高水平表现"
+            else:
+                label = "待突破型"
+                description = "该类学生尚未展现明显进步，需要额外关注和帮助"
+            
+            # 保存聚类标签和描述
+            cluster_labels[cluster_id] = {
+                'label': label,
+                'description': description,
+                'profile': cluster_profile.to_dict()
+            }
+        
+        self.cluster_profiles = cluster_labels
+        return cluster_labels
+
+    def prepare_data(self, data=None):
+        """
+        准备聚类分析所需的数据
+        
+        Args:
+            data: 输入数据，如果为None则使用初始化时的数据
+            
+        Returns:
+            DataFrame: 准备好的建模数据
+        
+        Raises:
+            ValueError: 当数据不满足基本要求时抛出
+        """
+        # 调用基类的prepare_data获取基础处理后的数据
+        model_data = super().prepare_data(data)
+        
+        # 获取数据处理工具
+        processors = self.data_processor.get_data_processors()
+        
+        # 确保考试数量足够
+        exam_ids = model_data['exam_id'].unique()
+        total_exams = len(exam_ids)
+        
+        if total_exams < self.min_exams:
+            raise ValueError(f"聚类分析需要至少{self.min_exams}次考试，当前只有{total_exams}次")
+        
+        # 确保有标准化分数
+        if 'standard_score' not in model_data.columns:
+            if 'score' in model_data.columns:
+                # 按考试ID分组标准化分数
+                model_data['standard_score'] = model_data.groupby('exam_id')['score'].transform(
+                    lambda x: (x - x.mean()) / x.std() if x.std() != 0 else 0
+                )
+                logger.info("已创建标准化分数字段")
+            else:
+                raise ValueError("数据中缺少'score'或'standard_score'字段")
+        
+        # 检查每个学生的考试次数
+        student_exam_counts = model_data.groupby('student_id')['exam_id'].nunique()
+        complete_students = student_exam_counts[student_exam_counts >= self.min_exams].index
+        
+        # 记录统计信息
+        logger.info(f"参加至少{self.min_exams}次考试的学生: {len(complete_students)}人")
+        
+        # 筛选数据
+        model_data = model_data[model_data['student_id'].isin(complete_students)]
+        
+        if len(model_data) == 0:
+            raise ValueError(f"没有学生参加了至少{self.min_exams}次考试，无法进行聚类分析")
+        
+        # 确保考试时间序列的一致性
+        if 'exam_date' in model_data.columns:
+            # 按日期排序考试
+            exam_dates = model_data.groupby('exam_id')['exam_date'].first().sort_values()
+            exam_order = {exam: i for i, exam in enumerate(exam_dates.index)}
+            model_data['exam_order'] = model_data['exam_id'].map(exam_order)
+        else:
+            # 如果没有日期，假设考试ID已经按时间顺序编号
+            exam_ids = sorted(model_data['exam_id'].unique())
+            exam_order = {exam: i for i, exam in enumerate(exam_ids)}
+            model_data['exam_order'] = model_data['exam_id'].map(exam_order)
+        
+        # 按学生ID和考试顺序排序
+        model_data = model_data.sort_values(['student_id', 'exam_order'])
+        
+        # 确保必要的名称字段
+        model_data = processors['ensure_student_names'](model_data)
+        model_data = processors['ensure_school_names'](model_data)
+        model_data = processors['ensure_class_names'](model_data)
+        model_data = processors['ensure_grade_field'](model_data)
+        
+        # 保存处理后的数据
+        self.data = model_data
+        
+        return model_data
+
+    def _build_model(self):
+        """
+        构建K-means聚类模型
+        
+        Returns:
+            sklearn.cluster.KMeans: 构建的K-means模型
+        """
+        from sklearn.cluster import KMeans
+        self.cluster_model = KMeans(
+            n_clusters=self.n_clusters,
+            random_state=self.random_state,
+            n_init=10
+        )
+        return self.cluster_model
+        
+    def _validate_data(self, data):
+        """
+        验证数据是否满足聚类分析的要求
+        
+        Args:
+            data: 待验证的数据
+            
+        Returns:
+            bool: 数据是否有效
+        """
+        # 检查是否存在必要字段
+        required_fields = ['student_id', 'exam_id']
+        for field in required_fields:
+            if field not in data.columns:
+                logger.error(f"数据缺少必要字段: {field}")
+                return False
+                
+        # 检查考试次数
+        if data['exam_id'].nunique() < self.min_exams:
+            logger.error(f"考试次数不足，需要至少{self.min_exams}次考试")
+            return False
+            
+        return True
+        
+    def _fit_model(self, data=None, **kwargs):
+        """
+        拟合聚类模型
+        
+        Args:
+            data: 输入数据，如果为None则使用类中已有的数据
+            **kwargs: 额外参数
+            
+        Returns:
+            dict: 拟合结果
+        """
+        if data is not None:
+            self.data = data
+            
+        # 更新参数(如果提供)
+        if 'clusters' in kwargs:
+            self.n_clusters = kwargs['clusters']
+        
+        if 'min_exams' in kwargs:
+            self.min_exams = kwargs['min_exams']
+            
+        # 提取特征
+        features = self._extract_clustering_features()
+        
+        # 选择用于聚类的特征列
+        clustering_features = [col for col in features.columns if col.endswith('_scaled')]
+        
+        # 构建并拟合模型
+        model = self._build_model()
+        features['cluster'] = model.fit_predict(features[clustering_features])
+        
+        # 保存结果
+        self.features_df = features
+        
+        # 解释聚类
+        self.cluster_profiles = self._interpret_clusters()
+        
+        # 返回聚类结果
+        return {
+            'features_df': features,
+            'cluster_profiles': self.cluster_profiles,
+            'cluster_model': model,
+            'cluster_results': features[['student_id', 'student_name', 'class_name', 'school_name', 'grade', 'cluster']]
+        }
+        
+    def _calculate_value_added_impl(self):
+        """
+        计算增值效应 - 对于聚类模型，返回聚类结果
+        
+        Returns:
+            dict: 聚类结果
+        """
+        if self.features_df is None or self.cluster_profiles is None:
+            raise ValueError("模型尚未拟合，请先调用fit方法")
+            
+        # 计算每个聚类的统计信息
+        cluster_stats = {}
+        for cluster_id in range(self.n_clusters):
+            if cluster_id not in self.cluster_profiles:
+                continue
+                
+            cluster_data = self.features_df[self.features_df['cluster'] == cluster_id]
+            if len(cluster_data) == 0:
+                continue
+                
+            profile = self.cluster_profiles[cluster_id]
+            cluster_stats[cluster_id] = {
+                'label': profile['label'],
+                'description': profile['description'],
+                'count': len(cluster_data),
+                'percentage': len(cluster_data) / len(self.features_df) * 100
+            }
+            
+        return {
+            'cluster_assignments': self.features_df[['student_id', 'cluster']].copy(),
+            'cluster_profiles': self.cluster_profiles,
+            'cluster_stats': cluster_stats
+        }
+        
+    def _predict_impl(self, data):
+        """
+        对新数据进行聚类预测
+        
+        Args:
+            data: 新数据
+            
+        Returns:
+            DataFrame: 预测结果
+        """
+        if self.cluster_model is None:
+            raise ValueError("模型尚未拟合，请先调用fit方法")
+            
+        # 准备数据
+        prepared_data = self.prepare_data(data)
+        
+        # 提取特征
+        features = self._extract_clustering_features()
+        
+        # 选择用于聚类的特征列
+        clustering_features = [col for col in features.columns if col.endswith('_scaled')]
+        
+        # 预测聚类
+        features['cluster'] = self.cluster_model.predict(features[clustering_features])
+        
+        return features
+        
+    def _extract_student_info(self, group):
+        """
+        从学生数据中提取基本信息
+        
+        Args:
+            group: 包含单个学生数据的DataFrame
+            
+        Returns:
+            dict: 学生基本信息
+        """
+        info = {
+            'student_name': 'Unknown',
+            'class_name': 'Unknown',
+            'school_name': 'Unknown',
+            'grade': 'Unknown'
+        }
+        
+        if 'student_name' in group.columns:
+            info['student_name'] = group['student_name'].iloc[0]
+        
+        if 'class_name' in group.columns:
+            info['class_name'] = group['class_name'].iloc[0]
+        
+        if 'school_name' in group.columns:
+            info['school_name'] = group['school_name'].iloc[0]
+        
+        if 'grade' in group.columns:
+            info['grade'] = group['grade'].iloc[0]
+        
+        return info
+
+    def prepare_data(self, data=None):
+        """准备聚类分析数据"""
+        if data is not None:
+            self.raw_data = data
+        
+        if self.raw_data is None:
+            raise ValueError("请提供数据")
+        
+        # 复制原始数据
+        model_data = self.raw_data.copy()
+        
+        # 创建数值索引和名称
+        model_data = self._create_numeric_indices(model_data)
+        model_data = self._ensure_names_and_ids(model_data)
+        
+        # 聚类特有处理：确保考试顺序和标准化分数
+        model_data = self._preprocess_time_series_data(model_data)
+        
+        # 保存处理后的数据
+        self.data = model_data
+        return model_data
+
+
 

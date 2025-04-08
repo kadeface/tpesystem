@@ -1,0 +1,9 @@
+{
+    "r_hat_max": 3.0,
+    "r_hat_min": 1.01,
+    "ess_min": 2.0,
+    "divergences": 1621,
+    "loo": null,
+    "mse": 259686.82311305415,
+    "r_squared": 0.9999999788503011
+}
