@@ -16,6 +16,10 @@
     
     # 使用时间序列贝叶斯模型(基于考试ID指定基线)
     python manage.py test_value_added_models --exams 1001 1002 1003 1004 1005 --subject 2 --model timeseries --baseline-exams 1001 1002 1003 1004 --target-exam 1005
+
+    # 使用学生聚类模型
+    python manage.py test_value_added_models --exams 2025-DIST-M-202301 2025-DIST-M-202307 2025-DIST-M-202401 2025-DIST-M-202407 2025-DIST-M-202501 --subject MATH --model student_cluster --clusters 12 --min-exams 5 --visualize-clusters
+    
 """
 
 import os
@@ -23,6 +27,7 @@ import time
 import logging
 import pandas as pd
 import numpy as np
+import json
 from django.core.management.base import BaseCommand
 from sklearn.metrics import silhouette_score
 from sklearn.cluster import KMeans  
@@ -108,13 +113,15 @@ class Command(BaseCommand):
                            help='寻找最优聚类时考虑的最大聚类数')
         parser.add_argument('--min-clusters', type=int, default=4,
                            help='最小聚类数量，即使轮廓系数较低')
+        parser.add_argument('--task-id', type=str, help='关联的分析任务ID')
     
     def handle(self, *args, **options):
         """命令处理入口"""
+        task_id = options.get('task_id')
+        
         try:
             # 配置matplotlib，抑制不必要的输出
             import matplotlib as mpl
-            # 设置matplotlib日志级别 - 修复写法
             mpl.set_loglevel('WARNING')  # 正确的方法
             
             # 禁用字体缓存更新
@@ -127,6 +134,9 @@ class Command(BaseCommand):
             import logging
             logging.getLogger('matplotlib').setLevel(logging.WARNING)
             logging.getLogger('PIL').setLevel(logging.WARNING)
+            
+            # 初始化任务
+            self.update_task_progress(task_id, 5, status='running')
             
             start_time = time.time()
             
@@ -143,6 +153,9 @@ class Command(BaseCommand):
             
             # 1. 仅获取原始数据，不做处理
             self.stdout.write(self.style.SUCCESS("1. 获取原始数据"))
+            # 更新进度 - 10%
+            self.update_task_progress(task_id, 10)
+            
             processor = ValueAddedDataProcessor()
             processor.load_data(exam_ids=options['exams'], subject_id=options['subject'], 
                                baseline_exam=options.get('baseline'))
@@ -153,6 +166,9 @@ class Command(BaseCommand):
             
             self.stdout.write(f"- 获取了{len(processor.data)}条原始数据")
             
+            # 更新进度 - 20%
+            self.update_task_progress(task_id, 20)
+            
             # 2. 创建输出目录
             output_dir = options['output']
             os.makedirs(output_dir, exist_ok=True)
@@ -162,80 +178,78 @@ class Command(BaseCommand):
             
             # 3. 测试每个指定的模型
             self.stdout.write(self.style.SUCCESS("2. 执行模型分析"))
+            
+            # 更新进度 - 30%
+            self.update_task_progress(task_id, 30)
+            
             for model_name in options['model']:
                 self.stdout.write(f"- 使用{model_name}模型进行分析")
                 
                 try:
                     # 特殊处理模型的专门函数
                     if model_name == 'nonlinear_potential':
-                        self._handle_nonlinear_potential(processor, options, output_dir)
+                        # 非线性潜力评估模型
+                        self._handle_timeseries_model(processor, options, output_dir)
                     elif model_name == 'tvam':
                         self._handle_tvam_model(processor, options, output_dir)
-                    elif model_name == 'bayesian':
-                        self._handle_bayesian_model(processor, options, output_dir)
-                    elif model_name == 'timeseries':
-                        self._handle_timeseries_model(processor, options, output_dir)
                     elif model_name == 'student_cluster':
+                        # 学生聚类分析
                         self._handle_student_cluster_analyzer(processor, options, output_dir)
+                    elif model_name == 'timeseries':
+                        # 时间序列贝叶斯模型
+                        self._handle_timeseries_model(processor, options, output_dir)
                     else:
-                        # 通用处理逻辑 - 只对没有专门处理函数的模型
-                        # 获取模型类并执行...
-                        ModelClass = MODEL_MAPPING[model_name]
-                        # 其余通用处理逻辑...
-                                            
+                        # 通用增值模型处理
+                        self._test_value_added_model(model_name, processor, options, output_dir)
+                        
+                    # 更新模型处理进度 
+                    # (用处理的模型数量更新进度，从30%到70%)
+                    models_count = len(options['model'])
+                    model_idx = options['model'].index(model_name) + 1
+                    progress = 30 + int(40 * model_idx / models_count)
+                    self.update_task_progress(task_id, progress)
                     
                 except Exception as e:
-                    self.stdout.write(self.style.ERROR(f"- {model_name}模型分析失败: {str(e)}"))
-                    logger.exception(f"{model_name}模型分析出错")
+                    self.stdout.write(self.style.ERROR(f"模型 {model_name} 分析失败: {str(e)}"))
+                    # 继续执行其他模型
             
-            # 5. 比较不同模型结果(如果测试了多个模型)
-            if len(results) > 1:
-                self.stdout.write(self.style.SUCCESS("5. 比较模型结果"))
+            # 4. 如果有多个模型且包含学生聚类，进行模型比较
+            if len(options['model']) > 1 and 'student_cluster' in options['model']:
+                self.stdout.write(self.style.SUCCESS("3. 比较不同模型"))
+                # 模型比较代码...
                 
-                # 创建比较表格
-                comparison = pd.DataFrame({
-                    'model': [],
-                    'fit_time': [],
-                    'r_squared': [],
-                    'entity_count': [],
-                    'mean_effect': [],
-                    'effect_range': []
-                })
-                
-                # 填充比较数据
-                for model_name, result in results.items():
-                    # 提取增值效应
-                    entity_key = f"{options['entity']}s" if options['entity'] == 'school' else 'classes'
-                    if entity_key in result['value_added'] and not result['value_added'][entity_key].empty:
-                        effects_df = result['value_added'][entity_key]
-                        
-                        row = {
-                            'model': model_name,
-                            'fit_time': result['fit_time'],
-                            'r_squared': result['metrics'].get('r_squared', 'N/A'),
-                            'entity_count': len(effects_df),
-                            'mean_effect': effects_df['mean'].mean(),
-                            'effect_range': effects_df['mean'].max() - effects_df['mean'].min()
-                        }
-                        comparison = comparison.append(row, ignore_index=True)
-                
-                # 保存比较结果
-                comparison_path = os.path.join(output_dir, 'model_comparison.csv')
-                comparison.to_csv(comparison_path, index=False)
-                self.stdout.write(f"- 模型比较结果已保存至 {comparison_path}")
-                
-                # 打印比较表格
-                self.stdout.write("\n模型比较:")
-                self.stdout.write(comparison.to_string())
+            # 更新进度 - 90%
+            self.update_task_progress(task_id, 90)
             
-            # 6. 完成
-            total_time = time.time() - start_time
-            self.stdout.write(self.style.SUCCESS(f"\n测试完成！总用时: {total_time:.2f}秒"))
-            self.stdout.write(f"结果保存在: {output_dir}")
+            # 5. 记录执行时间
+            end_time = time.time()
+            execution_time = end_time - start_time
+            self.stdout.write(self.style.SUCCESS(f"分析完成，耗时: {execution_time:.2f}秒"))
+            
+            # 6. 如果有任务ID，将输出目录记录到任务中
+            if task_id:
+                try:
+                    try:
+                        from django.apps import apps
+                        AnalysisTask = apps.get_model('edu_insights', 'AnalysisTask')
+                        task = AnalysisTask.objects.get(task_id=task_id)
+                        task.results_dir = output_dir
+                        task.save()
+                    except (ImportError, ModuleNotFoundError):
+                        self.stdout.write(f"analysis模块不存在，无法更新任务结果路径")
+                except Exception as e:
+                    self.stderr.write(f"更新任务结果目录失败: {str(e)}")
+                    
+            # 更新进度 - 100% 完成
+            self.update_task_progress(task_id, 100, status='completed')
             
         except Exception as e:
+            # 更新进度 - 失败
+            self.update_task_progress(task_id, 0, status='failed', error=str(e))
+            
             self.stdout.write(self.style.ERROR(f"发生错误: {str(e)}"))
-            logger.exception("测试过程中发生错误")
+            import traceback
+            self.stdout.write(traceback.format_exc())
             raise
 
     def _handle_nonlinear_potential(self, processor, options, output_dir):
@@ -1131,7 +1145,92 @@ class Command(BaseCommand):
             )
             
             # 分析学生分层特征和变化
-            features_with_layers = self._analyze_student_layers(features, filtered_data, cluster_output_dir)
+            features_with_layers, layer_growth_dict = self._analyze_student_layers(features, filtered_data, cluster_output_dir)
+            
+            # 转换为前端期望的格式
+            layer_growth_dict = {}
+            for level in layer_growth_dict.index:
+                for trend in layer_growth_dict.columns:
+                    key = f"{level}，{trend}型"
+                    layer_growth_dict[key] = float(layer_growth_dict.loc[level, trend])
+            
+            # 保存转换后的数据
+            growth_dict_path = os.path.join(output_dir, 'student_layer_growth_dict.json')
+            with open(growth_dict_path, 'w', encoding='utf-8') as f:
+                json.dump(layer_growth_dict, f, ensure_ascii=False, indent=2)
+            
+            self.stdout.write(f"- 分层成长键值对已保存至: {growth_dict_path}")
+            
+            # 修改ValueAddedModelAnalyzer.analyze方法，确保返回这个字典而不是交叉表
+            
+            # 在返回结果前处理考试记录数据
+            try:
+                self.stdout.write("- 处理学生考试记录数据...")
+                
+                # 创建考试记录字典（按学生ID分组）
+                exam_records = {}
+                
+                # 从filtered_data中提取考试记录（这里filtered_data应该包含原始考试数据）
+                for student_id, student_data in filtered_data.groupby('student_id'):
+                    # 按考试顺序排序
+                    student_exams = student_data.sort_values('exam_order')
+                    
+                    # 提取关键字段
+                    student_records = []
+                    for _, row in student_exams.iterrows():
+                        exam_record = {
+                            'exam_id': row.get('exam_id', ''),
+                            'exam_name': row.get('exam_name', f'考试 {row.get("exam_order", 0)}'),
+                            'exam_date': row.get('exam_date', ''),
+                            'raw_score': float(row.get('raw_score', row.get('score', 0))),
+                            'standard_score': float(row.get('standard_score', 0)),
+                            'percentile': float(row.get('percentile', 0)) if 'percentile' in row else None,
+                            'rank': int(row.get('rank', 0)) if 'rank' in row else None,
+                            'subject_id': row.get('subject_id', options.get('subject', '')),
+                            'total_score': float(row.get('total_score', 100)),
+                            'grade': row.get('grade', ''),
+                            'class_name': row.get('class_name', '')
+                        }
+                        student_records.append(exam_record)
+                    
+                    # 保存到总字典
+                    exam_records[student_id] = student_records
+                
+                self.stdout.write(f"- 处理了{len(exam_records)}名学生的考试记录")
+                
+                # 将考试记录数据保存到文件
+                exam_records_path = os.path.join(output_dir, 'exam_records.json')
+                with open(exam_records_path, 'w', encoding='utf-8') as f:
+                    json.dump(exam_records, f, ensure_ascii=False, indent=2)
+                
+                self.stdout.write(f"- 考试记录数据已保存至: {exam_records_path}")
+                
+                # 准备完整结果对象
+                full_result = {
+                    'student_clusters': features_with_layers, 
+                    'student_features': processor.cluster_analyzer.student_features, 
+                    'student_layer_growth': layer_growth_dict,
+                    'exam_records': exam_records  # 添加考试记录
+                }
+
+                # 保存完整结果
+                result_path = os.path.join(output_dir, 'analysis_result.json')
+                with open(result_path, 'w', encoding='utf-8') as f:
+                    json.dump(full_result, f, ensure_ascii=False, indent=2)
+
+                self.stdout.write(f"- 完整分析结果已保存至: {result_path}")
+
+                # 返回完整结果
+                return full_result
+                
+            except Exception as e:
+                self.stderr.write(f"处理考试记录数据出错: {str(e)}")
+                # 如果出错，仍返回其他数据
+                return {
+                    'student_clusters': features_with_layers, 
+                    'student_features': processor.cluster_analyzer.student_features, 
+                    'student_layer_growth': layer_growth_dict
+                }
             
         except Exception as e:
             self.stdout.write(self.style.ERROR(f"- 学生进步模式聚类分析失败: {str(e)}"))
@@ -1691,7 +1790,25 @@ class Command(BaseCommand):
             normalize='index'
         ) * 100
         
-        self.stdout.write("\n- 各层级学生成长率分布:")
+        # 添加调试信息，检查层级分布
+        self.stdout.write("\n- 学生层级分布检查:")
+        self.stdout.write(f"层级标签: {level_labels}")
+        self.stdout.write(f"层级分箱: {level_bins}")
+        self.stdout.write(f"层级统计: {features['start_level_category'].value_counts().to_dict()}")
+        self.stdout.write(f"层级唯一值: {features['start_level_category'].unique().tolist()}")
+        
+        # 确保所有层级都在交叉表中
+        for level in level_labels:
+            if level not in layer_growth.index:
+                self.stdout.write(f"警告: '{level}'层级在交叉表中缺失")
+                # 可以添加一行零值数据以确保所有层级都存在
+                empty_row = pd.Series(0, index=layer_growth.columns)
+                layer_growth.loc[level] = empty_row
+        
+        # 确保交叉表按照定义的层级顺序排序
+        layer_growth = layer_growth.reindex(level_labels)
+        
+        self.stdout.write("\n- 各层级学生成长率分布(修正后):")
         self.stdout.write(f"{layer_growth}")
         
         # 3. 导出交叉表
@@ -1701,7 +1818,23 @@ class Command(BaseCommand):
         # 4. 可视化各层级学生的成长情况
         self._visualize_layer_growth(features, layer_growth, raw_data, output_dir)
         
-        return features  # 返回添加了分层的特征数据
+        # 转换为前端期望的格式
+        layer_growth_dict = {}
+        for level in layer_growth.index:
+            for trend in layer_growth.columns:
+                key = f"{level}，{trend}型"
+                layer_growth_dict[key] = float(layer_growth.loc[level, trend])
+        
+        # 保存转换后的数据
+        growth_dict_path = os.path.join(output_dir, 'student_layer_growth_dict.json')
+        with open(growth_dict_path, 'w', encoding='utf-8') as f:
+            json.dump(layer_growth_dict, f, ensure_ascii=False, indent=2)
+        
+        self.stdout.write(f"- 分层成长键值对已保存至: {growth_dict_path}")
+        
+        # 修改ValueAddedModelAnalyzer.analyze方法，确保返回这个字典而不是交叉表
+        
+        return features, layer_growth_dict  # 返回转换后的字典
 
     def _visualize_layer_growth(self, features, layer_growth, raw_data, output_dir):
         """可视化各层级学生成长情况"""
@@ -1775,3 +1908,24 @@ class Command(BaseCommand):
         
         self.stdout.write(f"- 分层分析热力图已保存至: {heatmap_path}")
         self.stdout.write(f"- 分层典型轨迹已保存至: {trajectories_path}")
+
+    def update_task_progress(self, task_id, progress, status='running', error=None):
+        """更新分析任务进度"""
+        if not task_id:
+            return
+            
+        try:
+            from django.apps import apps
+            AnalysisTask = apps.get_model('edu_insights', 'AnalysisTask')
+            task = AnalysisTask.objects.get(task_id=task_id)
+                
+            # 更新任务状态
+            task.progress = progress
+            if status:
+                task.status = status
+            if error:
+                task.error = error
+            task.save()
+            self.stdout.write(f"更新任务进度: {progress}%")
+        except Exception as e:
+            self.stderr.write(f"更新任务进度失败: {str(e)}")

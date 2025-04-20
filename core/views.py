@@ -1,7 +1,7 @@
 from rest_framework import viewsets, filters
 from rest_framework.decorators import action
-from .models import Region, Semester, School, Student, Score, Subject, Teacher, TeacherHistory, TeacherSubjectClass
-from .serializers import RegionSerializer, SemesterSerializer, SchoolSerializer, StudentSerializer, ScoreSerializer, SubjectSerializer, TeacherSerializer
+from .models import Region, Semester, School, Student, Score, Subject, Teacher, TeacherHistory, TeacherSubjectClass, Grade, Exam,Class
+from .serializers import RegionSerializer, SemesterSerializer, SchoolSerializer, StudentSerializer, ScoreSerializer, SubjectSerializer, TeacherSerializer, ExamSerializer,GradeSerializer
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from .permissions import IsSchoolAdmin
@@ -24,17 +24,318 @@ from django.core.management import call_command
 from django.core.cache import cache
 import json
 from django.views.decorators.http import require_GET, require_POST
+from django.db import connection
+import re
+import logging
+import traceback
+from django.db.models import Q
+import random
+from datetime import datetime, timedelta
 
-class RegionViewSet(viewsets.ModelViewSet):
-    """
-    区域视图集，提供区域信息的CRUD操作。
+# 设置日志记录器
+logger = logging.getLogger(__name__)
 
-    Attributes:
-        queryset: 查询集
-        serializer_class: 序列化类
+def infer_graduation_year(grade_id, graduation_grade=9):
     """
+    根据 grade_id 推断毕业年份
+    
+    Args:
+        grade_id: 格式如 G02_7_231，其中 7 是年级，231 是学期编码
+        graduation_grade: 毕业年级（默认初中为9年级）
+        
+    Returns:
+        毕业年份（整数）
+        
+    Raises:
+        ValueError: 当grade_id格式无效时抛出
+    """
+    try:
+        # 解析 grade_id
+        parts = grade_id.split('_')
+        if len(parts) != 3:
+            raise ValueError("Invalid grade_id format")
+        
+        current_grade = int(parts[1])          # 当前年级（如7）
+        term_code = parts[2]                    # 学期编码（如231）
+        
+        if len(term_code) != 3 or not term_code.isdigit():
+            raise ValueError("Invalid term code")
+        
+        # 提取学年结束年份（如231中的23对应2023）
+        year_suffix = int(term_code[:2])       # 学年结束年份的后两位（如23）
+        current_year_end = 2000 + year_suffix  # 完整的学年结束年份（如2023）
+        
+        # 计算剩余学年数
+        remaining_years = graduation_grade - current_grade
+        if remaining_years < 0:
+            raise ValueError("Current grade exceeds graduation grade")
+        
+        # 毕业年份 = 当前学年结束年份 + 剩余学年数
+        graduation_year = current_year_end + remaining_years
+        return graduation_year
+    
+    except Exception as e:
+        print(f"Error processing grade_id {grade_id}: {e}")
+        return None
+
+class RegionViewSet(viewsets.ReadOnlyModelViewSet):
+    """区域API视图集"""
     queryset = Region.objects.all()
-    serializer_class = RegionSerializer 
+    serializer_class = RegionSerializer
+    pagination_class = None  # 禁用此视图的分页
+    
+    def get_queryset(self):
+        print("执行RegionViewSet.get_queryset方法")
+        queryset = super().get_queryset()
+        print(f"查询结果数量: {queryset.count()}")
+        parent_id = self.request.query_params.get('parent_id')
+        level = self.request.query_params.get('level')
+        
+        if parent_id:
+            queryset = queryset.filter(parent_id=parent_id)
+        if level:
+            queryset = queryset.filter(level=level)
+            
+        print(f"过滤后结果数量: {queryset.count()}")
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        # 添加日志
+        print("RegionViewSet.list被调用")
+        # 获取原始查询集
+        queryset = self.get_queryset()
+        print(f"查询结果: {list(queryset.values())}")
+        
+        # 调用父类方法完成响应
+        return super().list(request, *args, **kwargs)
+
+class SubjectViewSet(viewsets.ReadOnlyModelViewSet):
+    """学科API视图集"""
+    queryset = Subject.objects.all()
+    serializer_class = SubjectSerializer
+    
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        subject_type = self.request.query_params.get('subject_type')
+        
+        if subject_type:
+            queryset = queryset.filter(subject_type=subject_type)
+            
+        return queryset
+
+class ExamViewSet(viewsets.ReadOnlyModelViewSet):
+    """考试API视图集"""
+    queryset = Exam.objects.all().select_related('grade', 'subject', 'semester')
+    serializer_class = ExamSerializer
+    
+    def get_queryset(self):
+        # 添加详细日志记录
+        import json
+        print("\n===== 考试查询开始 =====")
+        print(f"请求参数: {dict(self.request.query_params)}")
+        
+        queryset = super().get_queryset()
+        print(f"初始考试数量: {queryset.count()}")
+        
+        # 记录数据库中的所有考试ID示例
+        sample_exams = list(queryset.values('exam_id', 'exam_name', 'grade_id')[:5])
+        print(f"考试样本: {json.dumps(sample_exams, ensure_ascii=False)}")
+        
+        # 获取筛选参数
+        subject_id = self.request.query_params.get('subject')
+        grade_id = self.request.query_params.get('grade_id')
+        education_stage = self.request.query_params.get('education_stage')
+        
+        if subject_id:
+            queryset = queryset.filter(subject_id=subject_id)
+            print(f"按学科筛选后: {queryset.count()}个考试")
+        
+        # 处理学段筛选
+        stage_from_grade = None
+        graduation_grade = 9  # 默认初中
+        
+        if grade_id:
+            # 从grade_id解析学段信息
+            try:
+                grade_level = int(grade_id.split('_')[1])
+                if grade_level <= 6:
+                    stage_from_grade = 'elementary'
+                    graduation_grade = 6  # 小学毕业年级
+                elif grade_level <= 9:
+                    stage_from_grade = 'junior'
+                    graduation_grade = 9  # 初中毕业年级
+                else:
+                    stage_from_grade = 'senior'
+                    graduation_grade = 12  # 高中毕业年级
+                print(f"从grade_id推断学段: {stage_from_grade}，毕业年级: {graduation_grade}")
+            except (IndexError, ValueError) as e:
+                print(f"从grade_id推断学段失败: {e}")
+        
+        # 优先使用请求中的education_stage参数，如果没有则使用从grade_id推断的值
+        stage = education_stage or stage_from_grade
+        if stage:
+            print(f"使用学段筛选: {stage}")
+            
+            # 根据学段筛选考试ID
+            from django.db.models import Q
+            stage_filter = None
+            
+            if stage == 'elementary':
+                # 小学考试ID通常包含P
+                stage_filter = (
+                    Q(exam_id__contains='P') | 
+                    Q(grade__grade_level__in=['1','2','3','4','5','6'])
+                )
+            elif stage == 'junior':
+                # 初中考试ID通常包含M
+                stage_filter = (
+                    Q(exam_id__contains='M') | 
+                    Q(grade__grade_level__in=['7','8','9'])
+                )
+            elif stage == 'senior':
+                # 高中考试ID通常包含H
+                stage_filter = (
+                    Q(exam_id__contains='H') | 
+                    Q(grade__grade_level__in=['10','11','12'])
+                )
+            
+            if stage_filter:
+                queryset = queryset.filter(stage_filter)
+                print(f"按学段筛选后: {queryset.count()}个考试")
+        
+        # 毕业年份筛选
+        if grade_id:
+            # 检查grade_id的格式
+            print(f"筛选条件 grade_id: {grade_id}")
+            
+            try:
+                # 使用正确的毕业年级参数推断毕业年份
+                graduation_year = infer_graduation_year(grade_id, graduation_grade)
+                if graduation_year:
+                    print(f"推断毕业年份: {graduation_year}（使用毕业年级: {graduation_grade}）")
+                    
+                    # 将毕业年份转换为字符串
+                    grad_year_str = str(graduation_year)
+                    
+                    # 构建Q对象进行OR查询
+                    from django.db.models import Q
+                    
+                    # 按照指定规则筛选考试ID
+                    # 1. 如果exam_id包含'M'或'P'，前4位应该是毕业年份
+                    # 2. 如果exam_id包含'H'，后6位包含年份
+                    exam_filter = (
+                        # M类型考试ID，前4位是毕业年份
+                        Q(exam_id__contains='M', exam_id__startswith=grad_year_str) |
+                        # P类型考试ID，前4位是毕业年份
+                        Q(exam_id__contains='P', exam_id__startswith=grad_year_str) |
+                        # H类型考试ID，后6位包含年份
+                        Q(exam_id__contains='H', exam_id__endswith=grad_year_str[-2:])
+                    )
+                    
+                    # 应用筛选条件
+                    queryset = queryset.filter(exam_filter)
+                    
+                    print(f"按毕业年份和考试ID格式筛选后: {queryset.count()}个考试")
+                else:
+                    print("无法推断毕业年份，不进行筛选")
+            except Exception as e:
+                print(f"处理grade_id出错: {e}")
+                # 出错时不进行筛选，保留所有考试
+        
+        # 最终结果
+        final_count = queryset.count()
+        print(f"最终查询结果: {final_count}个考试")
+        if final_count > 0:
+            final_sample = list(queryset.values('exam_id', 'exam_name', 'grade_id')[:5])
+            print(f"最终样本: {json.dumps(final_sample, ensure_ascii=False)}")
+        print("===== 考试查询结束 =====\n")
+        
+        return queryset
+
+    @action(detail=False, methods=['get'])
+    def with_graduation_info(self, request):
+        # 当前ExamListView的逻辑
+        pass
+
+class GradeViewSet(viewsets.ReadOnlyModelViewSet):
+    """年级API视图集"""
+    queryset = Grade.objects.all().select_related('school', 'semester')
+    serializer_class = GradeSerializer
+    pagination_class = None  # 禁用分页
+    
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        school_id = self.request.query_params.get('school')
+        stage = self.request.query_params.get('stage')
+        
+        if school_id:
+            queryset = queryset.filter(school_id=school_id)
+            
+        if stage:
+            # 根据学段过滤
+            if stage == 'elementary':
+                queryset = queryset.filter(grade_level__in=['1','2','3','4','5','6'])
+            elif stage == 'junior':
+                queryset = queryset.filter(grade_level__in=['7','8','9'])
+            elif stage == 'senior':
+                queryset = queryset.filter(grade_level__in=['10','11','12'])
+        
+        # 使用PostgreSQL的DISTINCT ON获取每个年级的最新记录
+        # 排序优先级：年级级别 -> 学期(降序) -> ID(降序)
+        return queryset.order_by(
+            'grade_level',
+            '-semester__semester_id',    # 学期号降序
+            'grade_id'                       # ID降序作为最后的排序依据
+        ).distinct('grade_level')
+
+    @action(detail=False, methods=['get'])
+    def with_graduation_info(self, request):
+        """获取年级信息以及计算的毕业年份信息"""
+        queryset = self.get_queryset()
+        
+        # 计算当前学年
+        now = timezone.now()
+        current_year = now.year
+        current_month = now.month
+        academic_year = current_year if current_month >= 9 else current_year - 1
+        
+        # 为每个年级添加毕业年份信息
+        grades_with_info = []
+        for grade in queryset:
+            grade_data = GradeSerializer(grade).data
+            try:
+                grade_level = int(grade.grade_level)
+                
+                # 计算毕业年份
+                if grade_level <= 6:  # 小学
+                    years_to_graduation = 6 - grade_level
+                    education_stage = 'elementary'
+                    stage_display = '小学'
+                elif grade_level <= 9:  # 初中
+                    years_to_graduation = 9 - grade_level
+                    education_stage = 'junior'
+                    stage_display = '初中'
+                else:  # 高中
+                    years_to_graduation = 12 - grade_level
+                    education_stage = 'senior'
+                    stage_display = '高中'
+                    
+                graduation_year = academic_year + years_to_graduation
+                
+                # 添加信息到年级数据
+                grade_data['graduation_year'] = graduation_year
+                grade_data['education_stage'] = education_stage
+                grade_data['stage_display'] = stage_display
+                grade_data['graduation_info'] = f"{graduation_year}届{stage_display}"
+                
+            except (ValueError, TypeError):
+                # 无法计算毕业年份
+                grade_data['graduation_year'] = None
+                grade_data['graduation_info'] = '未知'
+                
+            grades_with_info.append(grade_data)
+        
+        return Response(grades_with_info)
 
 class SemesterViewSet(viewsets.ModelViewSet):
     """
@@ -323,7 +624,6 @@ def perform_teacher_promotion(request):
         return JsonResponse({'status': 'error', 'message': '找不到指定的学期，请检查学期ID'})
         
     except Exception as e:
-        import traceback
         print(traceback.format_exc())
         return JsonResponse({'status': 'error', 'message': f'处理过程中出错: {str(e)}'})
 
@@ -453,7 +753,8 @@ def import_scores_view(request):
     """
     成绩导入页面 - 同步处理版本
     """
-    # 当前常规表单处理逻辑
+    # 定义上下文字典
+    context = {}
     
     if request.method == 'POST':
         # 处理表单提交
@@ -947,3 +1248,241 @@ def static_progress_view(request):
         'task_id': task_id,
         'title': '静态任务状态'
     })
+
+def debug_regions(request):
+    """调试用API，直接返回区域数据和诊断信息"""
+    try:
+        # 获取当前区域记录数
+        count = Region.objects.count()
+        
+        # 尝试获取所有区域数据
+        regions = list(Region.objects.all().values('region_id', 'region_name'))
+        
+        # 如果没有数据，添加测试数据（仅用于诊断）
+        if not regions:
+            # 仅在DEBUG模式下添加测试数据
+            if settings.DEBUG:
+                try:
+                    # 尝试添加一条测试数据
+                    region = Region.objects.create(
+                        region_id='test001',
+                        region_name='测试区域',
+                        level='city', 
+                        description='测试描述'
+                    )
+                    regions = [{'region_id': region.region_id, 'region_name': region.region_name}]
+                    return JsonResponse({
+                        'status': 'success', 
+                        'message': '成功创建测试数据',
+                        'regions': regions,
+                        'original_count': count
+                    })
+                except Exception as create_error:
+                    return JsonResponse({
+                        'status': 'error',
+                        'message': f'尝试创建测试数据失败: {str(create_error)}',
+                        'regions': [],
+                        'original_count': count
+                    })
+            
+        return JsonResponse({
+            'status': 'success',
+            'message': f'找到{len(regions)}条区域记录',
+            'regions': regions,
+            'count': count
+        })
+    except Exception as e:
+        import traceback
+        return JsonResponse({
+            'status': 'error',
+            'message': f'获取区域数据时出错: {str(e)}',
+            'traceback': traceback.format_exc()
+        }, status=500)
+
+def raw_regions_debug(request):
+    """直接从数据库返回区域原始数据"""
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT * FROM core_region")
+        columns = [col[0] for col in cursor.description]
+        regions = [dict(zip(columns, row)) for row in cursor.fetchall()]
+    return JsonResponse({'raw_regions': regions})
+
+# 考试列表API视图
+class ExamListView(APIView):
+    def get(self, request):
+        # 直接写入调试信息到文件
+        with open('exam_debug.log', 'a', encoding='utf-8') as f:
+            f.write(f"\n\n===== ExamListView 被调用 =====\n")
+            f.write(f"请求参数: {dict(request.query_params)}\n")
+        
+        # 标准输出和标准错误
+        print("\n\n***** ExamListView调试信息开始 *****", flush=True)
+        print(f"请求参数: {dict(request.query_params)}", flush=True)
+        print("***** ExamListView调试信息结束 *****\n\n", flush=True)
+        
+        import sys
+        sys.stderr.write("\n\n***** ExamListView stderr 输出 *****\n\n")
+        sys.stderr.flush()
+        
+        # 获取查询参数
+        grade_id = request.query_params.get('grade_id')
+        subject_id = request.query_params.get('subject')
+        district_id = request.query_params.get('district')
+        education_stage = request.query_params.get('education_stage')
+        exam_type = request.query_params.get('exam_type')
+        semester = request.query_params.get('semester')
+        
+        # 是否包含历史年级数据
+        include_history = request.query_params.get('include_history') == 'true'
+        
+        # 基本查询集
+        exams = Exam.objects.all()
+        
+        # 记录查询参数到文件
+        with open('exam_debug.log', 'a', encoding='utf-8') as f:
+            f.write(f"查询参数: grade_id={grade_id}, include_history={include_history}\n")
+        
+        # 始终应用毕业年份查询逻辑
+        if grade_id:
+            try:
+                # 1. 从grade_id推断毕业年份
+                graduation_year = infer_graduation_year(grade_id)
+                
+                if graduation_year:
+                    with open('exam_debug.log', 'a', encoding='utf-8') as f:
+                        f.write(f"从grade_id={grade_id}推断毕业年份: {graduation_year}\n")
+                    
+                    graduation_year_str = str(graduation_year)
+                    
+                    # 2. 通过考试ID格式匹配相同毕业年份的考试
+                    from django.db.models import Q
+                    
+                    # 构建查询条件
+                    query = Q()
+                    
+                    # 条件1: 带有M或P字符的考试ID，前四个字符是毕业年份
+                    # 例如: 2025-M-xxxx 或 2025-P-xxxx
+                    query |= Q(exam_id__startswith=graduation_year_str + '-') & (Q(exam_id__contains='-M-') | Q(exam_id__contains='-P-'))
+                    
+                    # 条件2: 带有H的考试ID，倒数第6到第2个字符是毕业年份
+                    # 例如: xxxx-H-2025-xx
+                    h_pattern = r'.*-H-.*' + graduation_year_str + r'.*'
+                    query |= Q(exam_id__regex=h_pattern)
+                    
+                    # 条件3: 直接包含当前年级ID的考试
+                    query |= Q(grade_id=grade_id)
+                    
+                    # 应用查询
+                    exams = exams.filter(query)
+                    
+                    with open('exam_debug.log', 'a', encoding='utf-8') as f:
+                        f.write(f"筛选出的包含毕业年份{graduation_year}的考试数量: {exams.count()}\n")
+                        # 记录生成的SQL查询
+                        f.write(f"SQL查询: {str(exams.query)}\n")
+                        
+                        # 记录前10个结果
+                        f.write("找到的考试:\n")
+                        for i, exam in enumerate(exams[:10]):
+                            f.write(f"{i+1}. ID: {exam.exam_id}, 名称: {exam.exam_name}, 年级: {exam.grade_id}\n")
+                else:
+                    with open('exam_debug.log', 'a', encoding='utf-8') as f:
+                        f.write(f"无法推断毕业年份，仅筛选当前年级考试\n")
+                    
+                    exams = exams.filter(grade_id=grade_id)
+            except Exception as e:
+                import traceback
+                with open('exam_debug.log', 'a', encoding='utf-8') as f:
+                    f.write(f"处理grade_id时出错: {e}\n")
+                    f.write(traceback.format_exc())
+                
+                exams = exams.filter(grade_id=grade_id)
+        
+        # 序列化结果
+        serializer = ExamSerializer(exams, many=True)
+        
+        # 返回结果前记录最终结果数量
+        with open('exam_debug.log', 'a', encoding='utf-8') as f:
+            f.write(f"最终返回考试数量: {len(serializer.data)}\n")
+            f.write("===== ExamListView 处理完成 =====\n\n")
+        
+        return Response(serializer.data)
+
+# 添加一个URL测试视图来确认routing配置正确
+def test_exam_view(request):
+    debug_info = {
+        'message': '测试ExamListView路由成功',
+        'params': dict(request.GET),
+        'method': request.method,
+        'path': request.path,
+        'settings': {
+            'DEBUG': getattr(settings, 'DEBUG', None),
+            'LOGGING': str(getattr(settings, 'LOGGING', {}))[:100] + '...'  # 仅显示部分配置
+        }
+    }
+    
+    # 直接打印到控制台
+    print("\n\n***** 测试视图被调用 *****")
+    print(f"调试信息: {debug_info}")
+    print("***** 测试视图结束 *****\n\n")
+    
+    # 返回详细响应
+    return HttpResponse(f"<pre>{json.dumps(debug_info, indent=2)}</pre>", content_type="text/html")
+
+def debug_exam_view(request):
+    """简单的调试视图，直接响应详细的调试信息"""
+    grade_id = request.GET.get('grade_id')
+    include_history = request.GET.get('include_history') == 'true'
+    
+    debug_info = {
+        '调试信息': '考试查询测试',
+        '查询参数': {
+            'grade_id': grade_id,
+            'include_history': include_history
+        }
+    }
+    
+    # 如果提供了grade_id，尝试推断毕业年份
+    if grade_id:
+        try:
+            graduation_year = infer_graduation_year(grade_id)
+            debug_info['毕业年份'] = graduation_year
+            
+            # 展示会用于查询的模式
+            if graduation_year:
+                graduation_year_str = str(graduation_year)
+                debug_info['查询模式'] = [
+                    f"{graduation_year_str}-M-*", 
+                    f"{graduation_year_str}-P-*",
+                    f"*-H-*{graduation_year_str}*",
+                    f"grade_id={grade_id}"
+                ]
+                
+                # 执行实际查询，但仅用于调试
+                from django.db.models import Q
+                query = Q()
+                query |= Q(exam_id__startswith=graduation_year_str + '-') & (Q(exam_id__contains='-M-') | Q(exam_id__contains='-P-'))
+                h_pattern = r'.*-H-.*' + graduation_year_str + r'.*'
+                query |= Q(exam_id__regex=h_pattern)
+                query |= Q(grade_id=grade_id)
+                
+                exams = Exam.objects.filter(query)
+                debug_info['查询结果数量'] = exams.count()
+                
+                # 提取前5个考试的信息
+                exam_samples = []
+                for exam in exams[:5]:
+                    exam_samples.append({
+                        'exam_id': exam.exam_id,
+                        'exam_name': exam.exam_name,
+                        'grade_id': exam.grade_id,
+                    })
+                debug_info['考试样本'] = exam_samples
+        except Exception as e:
+            debug_info['错误'] = str(e)
+    
+    # 返回格式化的JSON响应
+    return HttpResponse(
+        f"<pre>{json.dumps(debug_info, indent=2, ensure_ascii=False)}</pre>", 
+        content_type="text/html; charset=utf-8"
+    )
+

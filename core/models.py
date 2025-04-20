@@ -742,3 +742,15 @@ class ValueAddedConfig(models.Model):
         
     def __str__(self):
         return f"{self.config_name} ({self.target_type})" 
+
+# 模型结果存储
+class AnalysisResult(models.Model):
+    model_name = models.CharField(max_length=100)  # 模型名称
+    analysis_date = models.DateTimeField(auto_now_add=True)  # 分析时间
+    config = models.JSONField(default=dict)  # 配置参数
+    metrics = models.JSONField(default=dict)  # 指标数据
+    charts_data = models.JSONField(default=dict)  # 图表数据
+    file_paths = models.JSONField(default=dict)  # 结果文件路径
+    
+    class Meta:
+        ordering = ['-analysis_date'] 

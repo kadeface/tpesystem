@@ -1,0 +1,29 @@
+### 1. 创建新分析任务
+POST http://localhost:8000/api/edu-insights/tasks/
+Content-Type: application/json
+
+{
+  "exams": ["2025-DIST-M-202301", "2025-DIST-M-202307", "2025-DIST-M-202401", "2025-DIST-M-202407", "2025-DIST-M-202501"],
+  "subject": "MATH",
+  "model": ["student_cluster"],
+  "clusters": 12,
+  "min_exams": 5,
+  "visualize_clusters": true
+}
+
+### 2. 查询任务状态（替换TASK_ID为实际ID）
+GET http://localhost:8000/api/edu-insights/tasks/2103ebc1-43f5-4350-a326-cbce9330cf6d/status/
+Accept: application/json
+
+### 3. 获取任务结果（替换TASK_ID为实际ID）
+GET http://localhost:8000/api/edu-insights/tasks/2103ebc1-43f5-4350-a326-cbce9330cf6d/results/
+Accept: application/json
+
+### 4. 获取所有任务列表
+GET http://localhost:8000/api/edu-insights/tasks/
+Accept: application/json
+
+# 查询可用的考试记录
+from core.models import Exam
+exams = Exam.objects.all()
+print("可用考试:", [(exam.id, exam.name) for exam in exams[:10]])

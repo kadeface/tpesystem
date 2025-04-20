@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+import logging
+import logging.config  # 添加正确的导入语句
 
 # 构建项目根目录的路径
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -31,13 +33,18 @@ INSTALLED_APPS = [
     'core',  # 添加 core 应用
     'django_filters',
     'rest_api',  # 添加新的应用名称
+    'corsheaders',  # 添加此行
+    'edu_insights',
     # ...
 ]
-
+# 允许跨域（如果 Vue 和 Django 不同端口）
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:8080",  # Vue 默认端口
+]
 REST_FRAMEWORK = {
     'DEFAULT_FILTER_BACKENDS': ['django_filters.rest_framework.DjangoFilterBackend'],
     'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.DjangoModelPermissionsOrAnonReadOnly'
+        'rest_framework.permissions.AllowAny'  # 临时允许所有访问
     ],
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 10
@@ -45,6 +52,7 @@ REST_FRAMEWORK = {
 
 # 中间件设置
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',  # 必须放在第一位
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -93,7 +101,7 @@ DATABASES = {
 DEBUG = True  # 开发环境设为 True，生产环境必须设为 False
 
 # 如果 DEBUG 为 False，必须设置 ALLOWED_HOSTS
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]']  # 添加您的域名 
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]','192.168.1.100']  # 添加您的域名 
 
 # 添加 ROOT_URLCONF 设置
 ROOT_URLCONF = 'evaluation_system.urls' 
@@ -136,3 +144,55 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
 DEFAULT_CHARSET = 'utf-8'
 FILE_CHARSET = 'utf-8'
+
+# 添加或修改LOGGING配置
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '{levelname} {asctime} {module} {message}',
+            'style': '{',
+        },
+        'simple': {
+            'format': '{levelname} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'level': 'INFO',
+            'class': 'logging.StreamHandler',
+            'formatter': 'simple'
+        },
+        'file': {
+            'level': 'INFO',
+            'class': 'logging.FileHandler',
+            'filename': os.path.join(BASE_DIR, 'logs/django.log'),
+            'formatter': 'verbose'
+        },
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': True,
+        },
+        'core': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': True,
+        },
+    },
+}
+
+# 确保日志目录存在
+import os
+os.makedirs(os.path.join(BASE_DIR, 'logs'), exist_ok=True)
+
+# 确保日志配置生效
+try:
+    logging.config.dictConfig(LOGGING)
+    logging.error("**** 日志系统初始化 ****")
+except Exception as e:
+    print(f"日志配置错误: {e}")

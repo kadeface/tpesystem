@@ -1,0 +1,76 @@
+<!-- debug.html (放在项目根目录) -->
+<!DOCTYPE html>
+<html>
+<head>
+  <title>毕业年份考试查询调试</title>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }
+    pre { background: #f5f5f5; padding: 10px; border-radius: 5px; overflow: auto; }
+    .test-btn { background: #4CAF50; color: white; border: none; padding: 10px 15px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>毕业年份考试查询调试</h1>
+  
+  <h2>输入年级ID</h2>
+  <input type="text" id="grade-id" value="G02_9_251" style="width: 200px; padding: 5px;">
+  <button onclick="testGradeId()" class="test-btn">测试查询</button>
+  
+  <h2>结果：</h2>
+  <pre id="result">等待查询...</pre>
+  
+  <script>
+    function testGradeId() {
+      const gradeId = document.getElementById('grade-id').value;
+      const resultEl = document.getElementById('result');
+      
+      resultEl.textContent = '正在查询...';
+      
+      // 分析gradeId
+      const parts = gradeId.split('_');
+      let debug = {
+        gradeId: gradeId,
+        analysis: {}
+      };
+      
+      if (parts.length === 3) {
+        const [stage, level, term] = parts;
+        debug.analysis.stage = stage;
+        debug.analysis.level = parseInt(level);
+        debug.analysis.term = term;
+        
+        let gradYear = null;
+        let gradGrade = 9; // 默认初中
+        
+        if (stage === 'G01') gradGrade = 6; // 小学
+        else if (stage === 'G02') gradGrade = 9; // 初中
+        else if (stage === 'G03') gradGrade = 12; // 高中
+        
+        if (term.length === 3 && !isNaN(term)) {
+          const yearPart = term.substring(0, 2);
+          const termPart = term.substring(2, 3);
+          
+          debug.analysis.schoolYearEnd = 2000 + parseInt(yearPart);
+          debug.analysis.termNumber = parseInt(termPart);
+          
+          const remaining = gradGrade - debug.analysis.level;
+          gradYear = debug.analysis.schoolYearEnd + remaining;
+          debug.analysis.estimatedGradYear = gradYear;
+          
+          // 构建查询模式
+          if (gradYear) {
+            debug.queryPatterns = [
+              `${gradYear}-M-*`,
+              `${gradYear}-P-*`,
+              `*-H-*${gradYear}*`
+            ];
+          }
+        }
+      }
+      
+      resultEl.textContent = JSON.stringify(debug, null, 2);
+    }
+  </script>
+</body>
+</html>
