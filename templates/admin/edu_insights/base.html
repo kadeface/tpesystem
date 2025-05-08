@@ -1,0 +1,7 @@
+{% extends "admin/base_site.html" %}
+
+{% block nav-global %}
+    {{ block.super }}
+    <a href="{% url 'education_admin:edu_insights_studentscorefeatures_generate_features' %}" 
+       class="nav-link" style="margin-left: 15px;">生成学生成绩特征</a>
+{% endblock %} 

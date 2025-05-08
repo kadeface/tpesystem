@@ -16,9 +16,17 @@ from .admin_site import admin_site
 from django.contrib.admin import AdminSite, SimpleListFilter
 from .admin_imports import ImportDataAdmin
 from django.urls import path
-from django.db.models import Count, Case, When, IntegerField, Q, Value, F, OuterRef
+from django.db.models import Count, Case, When, IntegerField, Q, Value, F, OuterRef, Avg, StdDev, Max, Min
 from django.db import transaction
 from django.utils import timezone
+from django.http import HttpResponseRedirect
+from django.contrib import messages
+from django.urls import reverse
+from django import forms
+from django.shortcuts import render
+from edu_insights.models import StudentScoreFeatures
+
+
 
 class BaseAdmin(admin.ModelAdmin):
     """
@@ -706,5 +714,7 @@ class TeacherHistoryAdmin(admin.ModelAdmin):
     list_filter = ['semester', 'status', 'school', 'subject']
     search_fields = ['teacher__name', 'teacher__teacher_id', 'school__school_name']
     readonly_fields = ['teacher', 'school', 'semester', 'subject', 'grade', 'class_field']
+
+
 
 

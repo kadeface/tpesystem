@@ -461,5 +461,87 @@ export default {
       }
       return { data: [] };
     }
+  },
+
+  /**
+   * 获取教师增值数据
+   * 
+   * 根据筛选条件获取教师增值分析数据
+   * 
+   * Args:
+   *   filters: 筛选条件对象
+   * 
+   * Returns:
+   *   Promise: 返回教师增值数据的Promise
+   */
+  getTeacherValueAddedData(filters) {
+    console.log('调用教师增值分析API，参数:', filters)
+    
+    if (useMockData) {
+      console.log('使用模拟教师增值数据')
+      
+      // 模拟API响应数据
+      const mockResponse = {
+        overview: {
+          regionAvg: 78.5,
+          schoolAvg: 82.6,
+          subjectAvg: 79.8
+        },
+        teacherRanking: [
+          { teacherId: 'T001', teacherName: '张老师', school: '实验中学', subject: '数学', rank: 1, valueAdded: 93.5, percentile: 95 },
+          { teacherId: 'T002', teacherName: '李老师', school: '第一中学', subject: '数学', rank: 2, valueAdded: 87.2, percentile: 85 },
+          { teacherId: 'T003', teacherName: '王老师', school: '实验中学', subject: '数学', rank: 3, valueAdded: 82.9, percentile: 75 },
+          { teacherId: 'T004', teacherName: '赵老师', school: '第二中学', subject: '数学', rank: 4, valueAdded: 78.4, percentile: 65 },
+          { teacherId: 'T005', teacherName: '刘老师', school: '第三中学', subject: '数学', rank: 5, valueAdded: 73.8, percentile: 55 }
+        ],
+        schoolRanking: [
+          { schoolName: '实验中学', valueAdded: 87.2 },
+          { schoolName: '第一中学', valueAdded: 82.5 },
+          { schoolName: '第二中学', valueAdded: 78.4 },
+          { schoolName: '第三中学', valueAdded: 75.8 },
+          { schoolName: '第四中学', valueAdded: 72.3 }
+        ],
+        teacherTrend: {
+          teachers: ['张老师', '李老师', '王老师'],
+          timePoints: ['考试1', '考试2', '考试3', '考试4'],
+          series: [
+            {
+              name: '张老师',
+              type: 'line',
+              data: [78, 82, 88, 93]
+            },
+            {
+              name: '李老师',
+              type: 'line',
+              data: [75, 78, 83, 87]
+            },
+            {
+              name: '王老师',
+              type: 'line',
+              data: [70, 76, 80, 83]
+            }
+          ]
+        },
+        total: 5
+      }
+      
+      return Promise.resolve({ data: mockResponse })
+    }
+    
+    return axios.get('/api/edu-insights/teacher-value-added/', {
+      params: {
+        region: filters.region,
+        subject: filters.subject,
+        grade: filters.grade,
+        target_exam: filters.targetExam,     // 新参数：目标考试
+        baseline_exam: filters.baselineExam, // 新参数：基准考试
+        page: filters.page || 1,
+        page_size: filters.pageSize || 10
+      }
+    })
+  },
+
+  getTeacherValueAdded(params) {
+    return axios.get('/api/teacher-value-added/', { params });
   }
 }; 

@@ -34,7 +34,8 @@ INSTALLED_APPS = [
     'django_filters',
     'rest_api',  # 添加新的应用名称
     'corsheaders',  # 添加此行
-    'edu_insights',
+    'edu_insights.apps.EduInsightsConfig',  
+
     # ...
 ]
 # 允许跨域（如果 Vue 和 Django 不同端口）

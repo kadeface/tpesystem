@@ -112,9 +112,9 @@ export default {
         { date: '2024-04-05', type: '学生画像', name: '八年级学生学习模式分析' }
       ],
       stats: {
-        schools: 58,
-        teachers: 1247,
-        students: 32564,
+        schools: 116,
+        teachers: 6164,
+        students: 81572,
         reports: 215
       }
     }

@@ -251,24 +251,14 @@
                   </div>
                 </div>
                 
-                <div class="visualization-row">
-                  <div class="chart-section full-width">
-                    <div class="chart-header">
-                      <h4>所有层级成长模式 ({{ Object.keys(analysisResults.data.student_layer_growth).length }} 种组合)</h4>
-                    </div>
-                    <el-table 
-                      :data="Object.keys(analysisResults.data.student_layer_growth)
-                        .filter(key => typeof analysisResults.data.student_layer_growth[key] === 'number')
-                        .map(key => ({ 
-                          category: key, 
-                          count: analysisResults.data.student_layer_growth[key] 
-                        }))"
-                      style="width: 100%">
-                      <el-table-column prop="category" label="层级组合"></el-table-column>
-                      <el-table-column prop="count" label="学生数量"></el-table-column>
-                    </el-table>
-                  </div>
-                </div>
+                <!-- 找到类似这样的代码块并删除或注释掉 -->
+                <!-- <div class="growth-detail-table">
+                  <h3>所有层级成长模式 ({{ Object.keys(growthCombinations).length }} 种组合)</h3>
+                  <el-table :data="growthCombinationsTable" stripe style="width: 100%">
+                    <el-table-column prop="combination" label="层级组合" width="180" />
+                    <el-table-column prop="count" label="学生数量" />
+                  </el-table>
+                </div> -->
               </div>
             </div>
           </el-tab-pane>

@@ -1,0 +1,468 @@
+{% extends "admin/base_site.html" %}
+{% load i18n admin_urls static admin_modify %}
+
+{% block extrahead %}{{ block.super }}
+<script type="text/javascript" src="{% url 'admin:jsi18n' %}"></script>
+{{ form.media }}
+<style>
+    /* 时间轴样式 */
+    .timeline-container {
+        margin: 20px 0;
+        padding: 15px;
+        border: 1px solid #ddd;
+        border-radius: 5px;
+    }
+    
+    .timeline {
+        display: flex;
+        justify-content: space-between;
+        margin: 20px 0;
+        position: relative;
+    }
+    
+    .timeline::before {
+        content: "";
+        position: absolute;
+        top: 50%;
+        left: 0;
+        right: 0;
+        height: 2px;
+        background-color: #ddd;
+        z-index: 1;
+    }
+    
+    .timeline-item {
+        position: relative;
+        z-index: 2;
+    }
+    
+    .time-point {
+        width: 80px;
+        height: 30px;
+        background-color: #f8f9fa;
+        border: 1px solid #ddd;
+        border-radius: 15px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: all 0.3s;
+    }
+    
+    .time-point:hover {
+        background-color: #e9ecef;
+    }
+    
+    .time-point.active {
+        background-color: #007bff;
+        color: white;
+        border-color: #007bff;
+    }
+    
+    /* 表单布局优化 */
+    .form-row {
+        margin-bottom: 15px;
+    }
+    
+    #examContainer {
+        margin-top: 20px;
+    }
+    
+    /* 添加特征计算相关样式 */
+    .feature-status {
+        margin-top: 20px;
+        padding: 15px;
+        border: 1px solid #ddd;
+        border-radius: 5px;
+        display: none;
+    }
+    
+    .feature-status h4 {
+        margin-top: 0;
+        margin-bottom: 15px;
+    }
+    
+    .status-icon {
+        font-size: 18px;
+        margin-right: 10px;
+    }
+    
+    .loading {
+        display: inline-block;
+        width: 20px;
+        height: 20px;
+        border: 3px solid rgba(0,0,0,0.1);
+        border-radius: 50%;
+        border-top-color: #007bff;
+        animation: spin 1s ease-in-out infinite;
+    }
+    
+    @keyframes spin {
+        to { transform: rotate(360deg); }
+    }
+    
+    .status-item {
+        margin-bottom: 8px;
+    }
+    
+    .progress-bar {
+        height: 20px;
+        background-color: #f0f0f0;
+        border-radius: 10px;
+        margin-top: 15px;
+    }
+    
+    .progress-fill {
+        height: 100%;
+        background-color: #007bff;
+        border-radius: 10px;
+        width: 0%;
+        transition: width 0.5s ease;
+    }
+    
+    .feature-options {
+        margin-top: 20px;
+        padding: 15px;
+        border: 1px solid #ddd;
+        border-radius: 5px;
+    }
+</style>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // 获取DOM元素
+    const gradeSelect = document.getElementById('id_grade');
+    const examSelect = document.getElementById('id_exam');
+    const timelineContainer = document.getElementById('timelineContainer');
+    const examContainer = document.getElementById('examContainer');
+    
+    console.log('初始化成绩特征生成表单');
+    
+    // 处理年级选择变化
+    gradeSelect.addEventListener('change', function() {
+        const gradeId = this.value;
+        if (!gradeId) {
+            timelineContainer.style.display = 'none';
+            examContainer.style.display = 'none';
+            return;
+        }
+        
+        console.log('选择年级:', gradeId);
+        
+        // 加载时间轴数据
+        loadGradeTimeline(gradeId);
+    });
+    
+    // 加载年级时间轴
+    function loadGradeTimeline(gradeId) {
+        let url = `/api/admin/grade-timeline/${encodeURIComponent(gradeId)}/`;
+        
+        console.log('请求时间轴数据:', url);
+        
+        fetch(url)
+            .then(response => {
+                if (!response.ok) {
+                    return response.text().then(text => {
+                        console.error('错误响应内容:', text);
+                        throw new Error(`HTTP error ${response.status}: ${text}`);
+                    });
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log('获取到时间轴数据:', data);
+                renderTimeline(data);
+                timelineContainer.style.display = 'block';
+            })
+            .catch(error => {
+                console.error('时间轴数据获取错误:', error);
+                timelineContainer.style.display = 'none';
+            });
+    }
+    
+    // 渲染时间轴和考试列表
+    function renderTimeline(timelineData) {
+        const timeline = document.getElementById('gradeTlimeline');
+        timeline.innerHTML = '';
+        
+        // 创建时间轴项目
+        timelineData.forEach(gradePoint => {
+            const timelineItem = document.createElement('div');
+            timelineItem.className = 'timeline-item';
+            
+            // 创建时间点标签
+            const timePoint = document.createElement('div');
+            timePoint.className = 'time-point';
+            timePoint.textContent = gradePoint.grade_name;
+            timePoint.setAttribute('data-grade', gradePoint.grade_level);
+            
+            // 添加点击事件
+            timePoint.addEventListener('click', function() {
+                // 更新选中状态
+                document.querySelectorAll('.time-point').forEach(point => {
+                    point.classList.remove('active');
+                });
+                this.classList.add('active');
+                
+                // 填充考试选择器
+                populateExams(gradePoint.exams);
+            });
+            
+            timelineItem.appendChild(timePoint);
+            timeline.appendChild(timelineItem);
+        });
+        
+        // 默认选择最高年级
+        if (timelineData.length > 0) {
+            const lastGrade = timeline.lastChild.querySelector('.time-point');
+            lastGrade.click();
+        }
+    }
+    
+    // 填充考试选择器
+    function populateExams(exams) {
+        examSelect.innerHTML = '<option value="">---------</option>';
+        
+        if (exams && exams.length > 0) {
+            exams.forEach(exam => {
+                const option = document.createElement('option');
+                option.value = exam.id;
+                option.textContent = `${exam.name} (${exam.semester})`;
+                examSelect.appendChild(option);
+            });
+            examContainer.style.display = 'block';
+            console.log(`添加了 ${exams.length} 个考试选项`);
+        } else {
+            console.log('没有找到符合条件的考试');
+            examContainer.style.display = 'none';
+        }
+    }
+    
+    // 页面加载时检查是否有年级选择
+    if (gradeSelect.value) {
+        loadGradeTimeline(gradeSelect.value);
+    }
+    
+    // 添加特征计算相关功能
+    const generateFeaturesBtn = document.getElementById('generateFeaturesBtn');
+    const featureStatus = document.getElementById('featureStatus');
+    const progressFill = document.getElementById('progressFill');
+    const statusMessage = document.getElementById('statusMessage');
+    const generateLayeredFeatures = document.getElementById('generateLayeredFeatures');
+    
+    // 特征生成处理
+    if (generateFeaturesBtn) {
+        generateFeaturesBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            
+            const examId = examSelect.value;
+            if (!examId) {
+                alert('请先选择一个考试');
+                return;
+            }
+            
+            // 检查是否需要生成分层特征
+            const generateLayers = generateLayeredFeatures.checked;
+            
+            if (generateLayers) {
+                // 开始生成分层特征
+                generateLayeredExamFeatures(examId);
+            } else {
+                // 生成普通特征
+                generateStandardFeatures(examId);
+            }
+        });
+    }
+    
+    // 生成分层考试特征
+    function generateLayeredExamFeatures(examId) {
+        console.log('开始生成分层考试特征:', examId);
+        
+        // 显示状态面板
+        featureStatus.style.display = 'block';
+        statusMessage.innerHTML = '<span class="loading"></span> 正在生成考试分层特征...';
+        progressFill.style.width = '10%';
+        
+        // 请求生成特征
+        fetch('/api/admin/generate-exam-features/', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': getCsrfToken()
+            },
+            body: JSON.stringify({
+                exam_id: examId,
+                regenerate: true
+            })
+        })
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            console.log('特征生成请求结果:', data);
+            
+            if (data.status === 'processing') {
+                // 启动状态轮询
+                progressFill.style.width = '30%';
+                pollFeatureStatus(examId);
+            } else if (data.exists) {
+                statusMessage.innerHTML = '✓ 该考试已存在分层特征数据';
+                progressFill.style.width = '100%';
+            } else {
+                statusMessage.innerHTML = '✗ 特征生成请求失败: ' + (data.error || '未知错误');
+            }
+        })
+        .catch(error => {
+            console.error('特征生成请求错误:', error);
+            statusMessage.innerHTML = '✗ 请求出错: ' + error.message;
+        });
+    }
+    
+    // 改进轮询功能，使用指数退避算法
+    function pollFeatureStatus(examId) {
+        let pollCount = 0;
+        const maxPolls = 30; // 最多轮询30次
+        let pollInterval = 2000; // 初始间隔2秒
+        
+        const poll = function() {
+            pollCount++;
+            
+            if (pollCount > maxPolls) {
+                statusMessage.innerHTML = '⚠️ 特征计算超时，请检查后台日志';
+                return;
+            }
+            
+            fetch(`/api/admin/exam-feature-status/${examId}/`)
+                .then(response => response.json())
+                .then(data => {
+                    console.log('特征状态API返回数据:', JSON.stringify(data)); // 输出完整响应
+                    
+                    // 检查学生特征数量
+                    if (data.status === 'completed') {
+                        console.log('学生特征数量:', data.data.student_features);
+                        // 特征计算完成
+                        progressFill.style.width = '100%';
+                        
+                        // 显示统计信息
+                        let message = '✓ 分层特征计算完成:<br>';
+                        message += `- 区级特征: ${data.data.district_feature ? '已生成' : '未生成'}<br>`;
+                        message += `- 学校特征: ${data.data.school_features}个<br>`;
+                        message += `- 班级特征: ${data.data.class_features}个<br>`;
+                        message += `- 学生特征: ${data.data.student_features}个`;
+                        
+                        statusMessage.innerHTML = message;
+                    } else if (data.status === 'error') {
+                        // 特征计算错误
+                        statusMessage.innerHTML = '✗ 特征计算错误: ' + data.message;
+                    } else if (data.status === 'not_found') {
+                        // 还没有开始计算或者正在计算前的准备
+                        const progress = Math.min(20 + (pollCount / maxPolls) * 10, 30);
+                        progressFill.style.width = `${progress}%`;
+                        
+                        // 继续轮询，使用退避策略
+                        pollInterval = Math.min(pollInterval * 1.2, 10000); // 最长不超过10秒
+                        setTimeout(poll, pollInterval);
+                    } else {
+                        // 还在计算中，更新进度
+                        const progress = Math.min(30 + (pollCount / maxPolls) * 60, 90);
+                        progressFill.style.width = `${progress}%`;
+                        
+                        // 继续轮询
+                        setTimeout(poll, pollInterval);
+                    }
+                })
+                .catch(error => {
+                    console.error('状态查询错误:', error);
+                    statusMessage.innerHTML = '✗ 状态查询错误: ' + error.message;
+                    
+                    // 出错后尝试重试，但间隔延长
+                    pollInterval = Math.min(pollInterval * 2, 15000);
+                    if (pollCount < maxPolls) {
+                        setTimeout(poll, pollInterval);
+                    }
+                });
+        };
+        
+        // 开始轮询
+        setTimeout(poll, pollInterval);
+    }
+    
+    // 生成标准特征（表单提交方式）
+    function generateStandardFeatures(examId) {
+        // 直接提交表单，使用现有的处理逻辑
+        document.querySelector('form').submit();
+    }
+    
+    // 获取CSRF令牌
+    function getCsrfToken() {
+        return document.querySelector('[name=csrfmiddlewaretoken]').value;
+    }
+    
+    // 特征生成完成后强制刷新页面
+    function generateFinished() {
+        // ... 现有代码 ...
+        
+        // 重新加载页面以确保显示最新数据
+        window.location.reload();
+    }
+});
+</script>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+    <form method="post">
+        {% csrf_token %}
+        <div>
+            <fieldset class="module aligned">
+                {% for field in form %}
+                    {% if field.name != 'semester' %}
+                    <div class="form-row field-{{ field.name }}">
+                        {{ field.errors }}
+                        {{ field.label_tag }}
+                        {{ field }}
+                        {% if field.help_text %}
+                        <div class="help">{{ field.help_text|safe }}</div>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                {% endfor %}
+            </fieldset>
+            
+            <!-- 时间轴容器 -->
+            <div class="timeline-container" style="display:none;" id="timelineContainer">
+                <h4>学习历程时间轴</h4>
+                <div class="timeline" id="gradeTlimeline">
+                    <!-- 时间轴内容将由JavaScript动态生成 -->
+                </div>
+            </div>
+            
+            <!-- 添加特征选项 -->
+            <div class="feature-options" id="featureOptions">
+                <h4>特征生成选项</h4>
+                <div>
+                    <input type="checkbox" id="generateLayeredFeatures" name="generateLayeredFeatures" checked>
+                    <label for="generateLayeredFeatures">生成分层考试特征（区级、校级、班级、学生）</label>
+                    <div class="help">选中此项将生成详细的多层次考试特征，支持丰富的数据分析</div>
+                </div>
+            </div>
+            
+            <!-- 特征状态面板 -->
+            <div class="feature-status" id="featureStatus">
+                <h4>特征计算状态</h4>
+                <div id="statusMessage">等待开始...</div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+            </div>
+            
+            <div class="submit-row">
+                <button type="button" id="generateFeaturesBtn" class="default">生成特征</button>
+                <input type="submit" value="提交表单" name="_save" style="display:none;" />
+            </div>
+        </div>
+    </form>
+</div>
+{% endblock %} 

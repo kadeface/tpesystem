@@ -1,4 +1,6 @@
 from django.db import models
+from django.db.models.functions import Coalesce
+from django.db.models import Min
 
 class Region(models.Model):
     """
@@ -509,7 +511,15 @@ class Score(models.Model):
     class Meta:
         verbose_name = '成绩'
         verbose_name_plural = '成绩管理'
-        indexes = [models.Index(fields=['semester_id'])]
+        indexes = [
+            models.Index(fields=['semester_id']),
+            # 为学生成绩查询添加复合索引
+            models.Index(fields=['student_id', 'exam_id']),
+            # 为特定科目的学生成绩查询添加索引
+            models.Index(fields=['student_id', 'exam_id', 'subject_id']),
+            # 为学期成绩分析添加索引
+            models.Index(fields=['exam_id', 'subject_id']),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=['student', 'exam', 'subject'],
@@ -609,17 +619,32 @@ class TeacherSubject(models.Model):
         verbose_name_plural = '教师学科关联管理'
         unique_together = ('teacher', 'subject')  # 一个教师同一个学科只能有一条记录 
 
+def get_default_class():
+    from core.models import Class
+    return Class.objects.order_by('class_id').first().class_id if Class.objects.exists() else None
+
 class TeacherSubjectClass(models.Model):
     """
     教师-学科-班级关联模型，记录教师教授的学科和班级。
     """
     teacher = models.ForeignKey(Teacher, on_delete=models.CASCADE)
     subject = models.ForeignKey(Subject, on_delete=models.CASCADE)
-    class_field = models.ForeignKey(Class, on_delete=models.CASCADE)
+    class_obj = models.ForeignKey(Class, on_delete=models.CASCADE, 
+                                 db_column='class_obj_id',
+                                 null=True, blank=True)
     semester = models.ForeignKey(Semester, on_delete=models.CASCADE)
+    school = models.ForeignKey(School, on_delete=models.CASCADE, null=True, blank=True)
+    is_main = models.BooleanField(default=False)
+    status = models.CharField(max_length=10, default='ACTIVE')
     
     class Meta:
-        unique_together = [['teacher', 'subject', 'class_field', 'semester']]
+        unique_together = [['teacher', 'subject', 'class_obj', 'semester']]
+        indexes = [
+            models.Index(fields=['school', 'semester']),
+        ]
+        
+    def __str__(self):
+        return f"{self.teacher.name} - {self.subject.subject_name} - {self.class_obj.class_name}"
 
 class DataImportTool(models.Model):
     """
