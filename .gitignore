@@ -51,4 +51,8 @@ credentials.json
 # 数据文件
 *.xlsx
 *.csv
-import_errors.json 
+import_errors.json
+
+# 数据库备份文件（文件太大，不应提交到Git）
+databasebackup/
+*.sql 
