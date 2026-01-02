@@ -13,6 +13,7 @@
             <el-menu-item index="/school-value-added">学校增值分析</el-menu-item>
             <el-menu-item index="/teacher-value-added">教师增值分析</el-menu-item>
             <el-menu-item index="/student-portrait">学生成长画像</el-menu-item>
+            <el-menu-item index="/feature-analysis">特征分析</el-menu-item>
           </el-sub-menu>
           <el-menu-item index="/results">分析报告</el-menu-item>
           <el-menu-item index="/data-management">数据管理</el-menu-item>

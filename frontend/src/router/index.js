@@ -57,6 +57,37 @@ const routes = [
     path: '/test',
     name: 'test',
     component: TestView
+  },
+  {
+    path: '/feature-analysis',
+    name: 'FeatureAnalysis',
+    component: () => import('../views/feature-analysis/FeatureAnalysisHome.vue'),
+    children: [
+      {
+        path: 'district/:examId?',
+        name: 'DistrictAnalysis',
+        component: () => import('../views/feature-analysis/DistrictAnalysis.vue'),
+        props: true
+      },
+      {
+        path: 'school/:examId?/:districtId?',
+        name: 'SchoolAnalysis',
+        component: () => import('../views/feature-analysis/SchoolAnalysis.vue'),
+        props: true
+      },
+      {
+        path: 'class/:examId?/:schoolId?',
+        name: 'ClassAnalysis',
+        component: () => import('../views/feature-analysis/ClassAnalysis.vue'),
+        props: true
+      },
+      {
+        path: 'student/:examId?/:classId?',
+        name: 'StudentAnalysis',
+        component: () => import('../views/feature-analysis/StudentAnalysis.vue'),
+        props: true
+      }
+    ]
   }
 ]
 
