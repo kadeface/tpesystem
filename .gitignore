@@ -20,6 +20,11 @@ __pycache__/
 *.so
 .Python
 env/
+.venv/
+venv/
+ENV/
+env.bak/
+venv.bak/
 build/
 develop-eggs/
 dist/
@@ -50,9 +55,80 @@ credentials.json
 
 # 数据文件
 *.xlsx
+*.xls
+*.xlsm
 *.csv
+*.tsv
 import_errors.json
+full_backup.json
+*.json.bak
 
 # 数据库备份文件（文件太大，不应提交到Git）
 databasebackup/
-*.sql 
+*.sql
+*.sql.gz
+*.sql.bak
+*.db
+*.db-shm
+*.db-wal
+backup/
+backups/
+*.dump
+*.dmp
+
+# 电子表格和数据文件
+data/
+datasets/
+*.xlsb
+*.ods
+
+# 压缩文件（通常包含大文件）
+*.zip
+*.rar
+*.7z
+*.tar
+*.tar.gz
+*.gz
+*.bz2
+
+# 媒体文件（通常较大）
+*.mp4
+*.avi
+*.mov
+*.wmv
+*.flv
+*.mkv
+*.mp3
+*.wav
+*.flac
+*.aac
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.tiff
+*.psd
+*.ai
+
+# 结果和输出目录
+results/
+output/
+outputs/
+*.npz
+
+# 文档文件（可能较大）
+*.pdf
+*.doc
+*.docx
+*.ppt
+*.pptx
+
+# 其他大文件
+*.iso
+*.dmg
+*.exe
+*.msi
+*.dll
+*.so
+*.dylib 
