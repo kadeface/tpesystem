@@ -1,7 +1,11 @@
 const { defineConfig } = require('@vue/cli-service')
+const webpack = require('webpack')
+const { NormalModuleReplacementPlugin } = require('webpack')
 
-// 通过环境变量检测是否在 Cloud Studio 中
-const isCloudStudio = process.env.CLOUD_STUDIO === '1';
+// 环境变量：完全禁用 webpack-dev-server 客户端
+process.env.WDS_SOCKET_HOST = 'localhost'
+process.env.WDS_SOCKET_PORT = '9999'
+process.env.WDS_SOCKET_PATH = '/no-socket'
 
 module.exports = defineConfig({
   transpileDependencies: true,
@@ -9,12 +13,10 @@ module.exports = defineConfig({
     host: '0.0.0.0',
     port: 8080,
     allowedHosts: 'all',
-    hot: !isCloudStudio,
-    liveReload: !isCloudStudio,
-    // 使用空字符串来禁用 WebSocket
-    client: {
-      overlay: false
-    },
+    hot: false,  // 禁用热模块替换
+    liveReload: false,  // 禁用实时重载
+    webSocketServer: false,  // 禁用 WebSocket 服务器
+    client: false,  // 完全禁用客户端
     proxy: {
       '/api': {
         target: 'http://localhost:8000',
@@ -26,13 +28,27 @@ module.exports = defineConfig({
       }
     }
   },
-  // 通过 chainWebpack 完全移除 WebSocket 客户端代码
-  chainWebpack: config => {
-    if (isCloudStudio) {
-      // 移除 webpack-dev-server 的客户端入口
-      config.devServer.set('client', {
-        webSocketURL: 'ws://localhost:0'
-      });
+  configureWebpack: {
+    plugins: [
+      new webpack.DefinePlugin({
+        __VUE_PROD_DEVTOOLS__: false,
+        __VUE_OPTIONS_API__: true,
+        __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: false,
+        // 定义环境变量禁用 WebSocket
+        WDS_SOCKET_HOST: JSON.stringify('localhost'),
+        WDS_SOCKET_PORT: JSON.stringify('9999')
+      }),
+      // 替换 webpack-dev-server 客户端模块为空模块
+      new NormalModuleReplacementPlugin(
+        /webpack-dev-server\/client/,
+        require.resolve('./dev-server-empty.js')
+      )
+    ],
+    resolve: {
+      alias: {
+        // 完全禁用 webpack-dev-server 客户端
+        'webpack-dev-server/client': false
+      }
     }
   }
 })

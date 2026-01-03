@@ -1,5 +1,6 @@
 <template>
-  <div class="home-dashboard">
+  <!-- eslint-disable vue/multi-word-component-names -->
+  <div class="home-dashboard-container">
     <!-- 欢迎横幅 -->
     <div class="welcome-banner">
       <div class="banner-content">
@@ -104,7 +105,7 @@
 
     <!-- 分析模块 -->
     <el-row :gutter="20" class="analysis-row">
-      <el-col :xs="24" :sm="8" v-for="(module, index) in analysisModules" :key="index">
+      <el-col :xs="24" :sm="12" :md="6" :lg="6" v-for="(module, index) in analysisModules" :key="index">
         <el-card class="analysis-card" shadow="hover" @click="navigateTo(module.path)">
           <div class="analysis-content">
             <div class="analysis-icon" :style="{ background: module.bg }">
@@ -205,6 +206,7 @@
 </template>
 
 <script setup>
+/* eslint-disable vue/multi-word-component-names */
 import { ref, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import * as echarts from 'echarts'
@@ -216,14 +218,11 @@ import {
   Document,
   Operation,
   TrendCharts,
-  DataAnalysis,
   Bell,
   Trophy,
   ArrowUp,
   ArrowDown,
-  Minus,
-  TrendCharts as TrendIcon,
-  TrendCharts as LineChart
+  Minus
 } from '@element-plus/icons-vue'
 
 const router = useRouter()
@@ -523,7 +522,7 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.home-dashboard {
+.home-dashboard-container {
   padding: 0;
 }
 
