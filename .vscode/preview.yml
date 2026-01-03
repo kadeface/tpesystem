@@ -1,0 +1,16 @@
+# 点击运行后会调用该文件配置自动运行应用，更多运行命令示例可前往https://docs.qq.com/aio/DRUFZcHVvZlJuY3l2?u=7c2feb6441bf45a9850c937243d1d070&p=TDSrqgLJdfWD1BI4QnDlct
+
+autoOpen: false # 打开应用时是否自动开启所有下方apps的预览
+apps: # 支持配置多个应用
+  - port: 8000
+    run: python manage.py runserver 0.0.0.0:8000
+    root: .
+    name: Django Backend
+    description: 区域教学增值评价系统后端 API
+    autoOpen: false
+  - port: 8080
+    run: bash build-and-serve.sh
+    root: ./frontend
+    name: Vue Frontend
+    description: 区域教学增值评价系统前端界面
+    autoOpen: true

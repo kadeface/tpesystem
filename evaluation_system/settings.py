@@ -102,7 +102,15 @@ DATABASES = {
 DEBUG = True  # 开发环境设为 True，生产环境必须设为 False
 
 # 如果 DEBUG 为 False，必须设置 ALLOWED_HOSTS
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]','192.168.1.100']  # 添加您的域名 
+ALLOWED_HOSTS = ['*', 'localhost', '127.0.0.1', '[::1]', '192.168.1.100']  # 允许所有主机访问(包括Cloud Studio公网域名)
+
+# CSRF 可信来源设置 - 用于 Cloud Studio 和前后端分离
+CSRF_TRUSTED_ORIGINS = [
+    'http://localhost:8000',
+    'http://127.0.0.1:8000',
+    'https://9b7cd9095de340c095a263310963b5cc--8000.ap-shanghai2.cloudstudio.club',
+    'https://9b7cd9095de340c095a263310963b5cc--8080.ap-shanghai2.cloudstudio.club',
+] 
 
 # 添加 ROOT_URLCONF 设置
 ROOT_URLCONF = 'evaluation_system.urls' 
